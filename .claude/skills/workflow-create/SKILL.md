@@ -1,0 +1,170 @@
+---
+name: workflow-create
+description: >
+  .workflow/config.yml に新しいワークフローテンプレートをインタラクティブに追加するスキル。
+  「ワークフローを作りたい」「新しいフローを定義して」「hotfix フローを追加して」
+  「config.yml を作りたい」「config.yml が存在しない」「ワークフローを登録したい」
+  「カスタムフローを追加して」「デプロイフローを作りたい」など、
+  ワークフローを新規作成・追加したいときは必ずこのスキルを使うこと。
+  /workflow-orchestrator から「config.yml が見つかりません」と案内された直後も使う。
+---
+
+# Workflow Create スキル
+
+`.workflow/config.yml` に新しいワークフローをインタラクティブに定義・追記する。
+
+---
+
+## 前提確認
+
+1. `.workflow/config.yml` が存在するか確認する
+   - **存在する場合**：ファイルを読み、既存の `commands` キーと `workflows` スラッグを把握する
+   - **存在しない場合**：新規作成モードで進める（後述）
+
+2. `.workflow/workflow.schema.json` が存在するか確認する（バリデーション用）
+
+---
+
+## ステップ 1：ワークフロー基本情報をヒアリング
+
+以下の形式でユーザーに質問する：
+
+```
+## ワークフロー作成
+
+**ワークフロー名（スラッグ）：** 英小文字・ハイフン区切り（例: hotfix, release, review）
+**説明（任意）：**
+```
+
+- スラッグが既存の `workflows` キーと重複する場合は「`{slug}` はすでに定義されています。上書きしますか？」と確認する
+- スラッグは `^[a-z][a-z0-9-]*$` を満たす形式で入力を促す
+
+---
+
+## ステップ 2：コマンドの確認（必要に応じて）
+
+gate ステップで使うコマンドを定義する。
+
+- **config.yml が存在する場合**：現在の `commands` を表示する
+  ```
+  現在のコマンド： test: make test / lint: make lint / build: make build
+  ```
+- **新規作成の場合**：以下を確認する
+  ```
+  テストコマンドを教えてください（例: make test / npm test / pytest）：
+  ```
+  lint・build コマンドも「追加しますか？」で確認する（任意）
+
+- **ヒアリング中に新しいコマンドキーが必要になった場合**：
+  ```
+  `commands` に新しいコマンドを追加しますか？
+  キー名：> deploy
+  コマンド：> make deploy
+  ```
+
+---
+
+## ステップ 3：ステップをインタラクティブに定義
+
+最低 2 ステップを推奨する。以下の形式でループする：
+
+```
+**ステップ {N} を定義してください：**
+  id（英小文字・ハイフン区切り）：>
+  名前：>
+  説明（任意）：>
+  チェックリストキー（任意、記録が必要なステップのみ）：>
+  ゲート（任意、利用可能: {commands のキー一覧}）：>
+
+ステップを追加しますか？ [y/n]：
+```
+
+### 各フィールドのバリデーション
+
+| フィールド | ルール |
+|-----------|-------|
+| `id` | `^[a-z][a-z0-9_-]*$`。重複不可（同一ワークフロー内） |
+| `checklist_key` | `^[a-z][a-z0-9_-]*$` |
+| `gate` | `commands` に定義されたキーのみ。未定義キーを指定したら「`{gate値}` は commands に定義されていません。追加しますか？」と促す |
+
+`description`・`checklist_key`・`gate` は空白入力でスキップ（YAML に出力しない）。
+
+---
+
+## ステップ 4：プレビューを表示して確認を取る
+
+以下の形式でプレビューを表示する：
+
+```yaml
+{slug}:
+  name: {name}
+  description: {description}  # description が空の場合は省略
+  steps:
+    - id: {id}
+      name: {name}
+      description: {description}  # 空の場合は省略
+      checklist_key: {key}        # 空の場合は省略
+      gate: {gate}                # 空の場合は省略
+    ...
+```
+
+「`config.yml` に追記しますか？ [y/n]：」で確認を取る。
+
+---
+
+## ステップ 5：config.yml に書き込む
+
+### config.yml が存在する場合（追記）
+
+`workflows:` セクションの末尾に新しいワークフローを追記する。
+
+- 同名スラッグを上書きする場合は既存ブロックを置き換える
+- インデントは 2 スペース統一
+
+### config.yml が存在しない場合（新規作成）
+
+以下の構造でファイルを新規作成する：
+
+```yaml
+# yaml-language-server: $schema=./workflow.schema.json
+# workflow-orchestrator 設定ファイル
+
+commands:
+  test: {テストコマンド}
+  # lint: make lint
+  # build: make build
+
+workflows:
+  {slug}:
+    name: {name}
+    description: {description}
+    steps:
+      ...
+```
+
+### 書き込み後の処理
+
+- Edit または Write ツールで書き込むと、`post-edit-validate-config.sh` フックがスキーマを自動検証する
+- **スキーマ警告が出た場合**：ユーザーへの完了報告前に必ず自己修正する
+
+---
+
+## ステップ 6：完了報告
+
+```
+✅ ワークフロー `{slug}` を config.yml に追記しました。
+
+実行するには：
+  /workflow-orchestrator {slug}
+```
+
+---
+
+## エラー対応
+
+| 状況 | 対応 |
+|------|------|
+| スラッグ重複（上書き拒否） | 別のスラッグで再入力を促す |
+| gate に未定義キーを指定 | 「追加しますか？」で commands への追加を提案 |
+| スキーマ警告が出た | 自己修正してから完了報告する |
+| `.workflow/` ディレクトリが存在しない | `mkdir -p .workflow` を実行してから書き込む |

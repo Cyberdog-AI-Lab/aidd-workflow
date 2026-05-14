@@ -1,0 +1,10 @@
+# Rust
+/target/
+
+# workflow-runner 実行時の一時ファイル
+.workflow/state.json
+.workflow/checklist.md
+.workflow/GATE_ACTIVE
+
+# Claude Code ローカル設定
+.claude/settings.local.json

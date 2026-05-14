@@ -1,0 +1,62 @@
+# yaml-language-server: $schema=./workflow.schema.json
+# workflow-orchestrator 設定ファイル
+# このファイルをプロジェクトルートの .workflow/config.yml に置く
+
+# プロジェクト固有のコマンド定義（Makefile の target 名を登録する）
+commands:
+  test: make test
+  lint: make lint
+  build: make build
+
+# ワークフローテンプレート
+workflows:
+  bug-fix:
+    name: バグ修正フロー
+    description: バグを再現・特定し、修正・テストまで完走するフロー
+    steps:
+      - id: reproduce
+        name: 再現確認
+        description: バグを手元で再現し、再現手順（環境・操作・期待値・実際の挙動）を記録する
+        checklist_key: reproduce
+
+      - id: identify
+        name: 原因特定
+        description: 原因となるファイル・関数・行を特定してチェックリストに記録する
+        checklist_key: identify
+
+      - id: implement
+        name: 修正実装
+        description: 最小限の変更でバグを修正する。影響範囲を意識すること
+
+      - id: test
+        name: テスト実行
+        description: "make test を実行してテストがパスすることを確認する（ゲート：テスト実行記録が必須）"
+        gate: test
+
+      - id: complete
+        name: 完了判定
+        description: すべてのステップが完了したことを確認し、作業を完了とマークする
+        requires: [reproduce, identify, test]
+
+  feature:
+    name: 機能開発フロー
+    description: 新機能を設計・実装・テストするフロー
+    steps:
+      - id: design
+        name: 設計確認
+        description: 実装方針・影響範囲・インターフェースを整理して記録する
+        checklist_key: design
+
+      - id: implement
+        name: 実装
+        description: 設計に従って実装する
+
+      - id: test
+        name: テスト実行
+        description: "make test を実行してテストがパスすることを確認する（ゲート：テスト実行記録が必須）"
+        gate: test
+
+      - id: complete
+        name: 完了判定
+        description: 実装・テストが完了したことを確認する
+        requires: [design, test]
