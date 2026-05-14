@@ -11,9 +11,9 @@ use chrono::Utc;
 
 use config::loader::load_config;
 use engine::state::{
-    load_state, save_state, clear_state,
     WorkflowState, StepStatus, ActionReport,
 };
+use engine::store::{load_state, save_state, clear_state};
 use engine::{dag, gate, executor};
 use protocol::{
     input::ReportInput,
@@ -27,11 +27,11 @@ use adapters::claude_code::hook_handler;
 #[derive(Parser)]
 #[command(name = "workflow-runner", about = "Workflow execution engine for AI tools")]
 struct Cli {
-    /// アダプター名（claude-code | standalone）
+    /// Adapter name (claude-code | standalone)
     #[arg(long, default_value = "claude-code")]
     adapter: String,
 
-    /// プロジェクトルートディレクトリ（省略時は現在のディレクトリ）
+    /// Project root directory (defaults to current directory)
     #[arg(long)]
     cwd: Option<PathBuf>,
 
@@ -41,29 +41,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// ワークフローを開始して最初のアクション群を返す
+    /// Start a workflow and return the first set of actions.
     Start {
         workflow: String,
     },
-    /// 現在の状態から次に実行すべきアクション群を返す
+    /// Return the next set of actions from the current state.
     Next,
-    /// アクション実行結果を記録する（stdin: JSON）
+    /// Record an action execution result (stdin: JSON).
     Report,
-    /// ステップを完了にする（ゲートチェック付き）
+    /// Mark a step as complete (with gate check).
     Complete {
         step_id: String,
     },
-    /// 中断ワークフローの再開情報を返す
+    /// Return resume information for an interrupted workflow.
     Resume,
-    /// 現在の実行状態を JSON で返す
+    /// Return the current execution state as JSON.
     Status,
-    /// config.yml を検証する
+    /// Validate config.yml.
     Validate,
-    /// 利用可能なワークフロー一覧を返す
+    /// List available workflows.
     List,
-    /// Claude Code フックイベントを処理する（stdin: hook JSON）
+    /// Process a Claude Code hook event (stdin: hook JSON).
     Hook {
-        /// イベント種別（post-bash | pre-taskupdate | post-edit）
+        /// Event type: post-bash | pre-taskupdate | post-edit
         event_type: String,
     },
 }
@@ -101,12 +101,10 @@ fn run(cmd: Commands, cwd: &PathBuf, adapter: &str) -> Result<String> {
     }
 }
 
-// ─── start ──────────────────────────────────────────────────────────────────
-
 fn cmd_start(cwd: &PathBuf, workflow_name: &str) -> Result<String> {
     let config = load_config(cwd)?;
     let wf = config.workflows.get(workflow_name)
-        .with_context(|| format!("ワークフロー '{}' が config.yml に見つかりません", workflow_name))?;
+        .with_context(|| format!("workflow '{}' not found in config.yml", workflow_name))?;
 
     let state = WorkflowState::new(workflow_name, wf);
     save_state(cwd, &state)?;
@@ -115,34 +113,29 @@ fn cmd_start(cwd: &PathBuf, workflow_name: &str) -> Result<String> {
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-// ─── next ───────────────────────────────────────────────────────────────────
-
 fn cmd_next(cwd: &PathBuf) -> Result<String> {
     let config = load_config(cwd)?;
     let state = load_state(cwd)?
-        .context("実行中のワークフローがありません。先に workflow-runner start <workflow> を実行してください")?;
+        .context("no workflow in progress; run `workflow-runner start <workflow>` first")?;
     let wf = config.workflows.get(&state.workflow)
-        .with_context(|| format!("ワークフロー '{}' が config.yml に見つかりません", state.workflow))?;
+        .with_context(|| format!("workflow '{}' not found in config.yml", state.workflow))?;
 
     let output = executor::build_next(wf, &state, &config);
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-// ─── report ─────────────────────────────────────────────────────────────────
-
 fn cmd_report(cwd: &PathBuf) -> Result<String> {
     let input_str = read_stdin()?;
     let input: ReportInput = serde_json::from_str(&input_str)
-        .context("report の stdin が不正な JSON です")?;
+        .context("report stdin is not valid JSON")?;
 
     let config = load_config(cwd)?;
     let mut state = load_state(cwd)?
-        .context("実行中のワークフローがありません")?;
+        .context("no workflow in progress")?;
 
     let wf = config.workflows.get(&state.workflow)
-        .with_context(|| format!("ワークフロー '{}' が見つかりません", state.workflow))?;
+        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
-    // ステップ状態を InProgress に遷移（まだなら）
     {
         let s = state.steps.entry(input.step_id.clone()).or_default();
         if s.status == StepStatus::Pending {
@@ -151,7 +144,6 @@ fn cmd_report(cwd: &PathBuf) -> Result<String> {
         }
     }
 
-    // gate: true の run アクションなら gate_recorded をセット
     let is_gate = is_gate_action(wf, &input.step_id, input.action_index);
     {
         let s = state.steps.entry(input.step_id.clone()).or_default();
@@ -167,14 +159,12 @@ fn cmd_report(cwd: &PathBuf) -> Result<String> {
         });
     }
 
-    // 並列サブステップなら親の状態を同期
     if let Some(parent_id) = dag::parent_of(&input.step_id) {
-        state.sync_parallel_parent(parent_id, wf);
+        state.sync_parallel_parent(parent_id, wf)?;
     }
 
     save_state(cwd, &state)?;
 
-    // checklist.md に gate アクションの結果を記録
     if is_gate {
         if let Some(stdout) = &input.stdout {
             append_checklist(cwd, stdout)?;
@@ -185,14 +175,12 @@ fn cmd_report(cwd: &PathBuf) -> Result<String> {
     Ok(out.to_string())
 }
 
-// ─── complete ───────────────────────────────────────────────────────────────
-
 fn cmd_complete(cwd: &PathBuf, step_id: &str) -> Result<String> {
     let config = load_config(cwd)?;
     let mut state = load_state(cwd)?
-        .context("実行中のワークフローがありません")?;
+        .context("no workflow in progress")?;
     let wf = config.workflows.get(&state.workflow)
-        .with_context(|| format!("ワークフロー '{}' が見つかりません", state.workflow))?;
+        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
     let gate_result = gate::check(wf, &state, step_id);
     if !gate_result.allowed {
@@ -205,16 +193,14 @@ fn cmd_complete(cwd: &PathBuf, step_id: &str) -> Result<String> {
         return Ok(serde_json::to_string_pretty(&output)?);
     }
 
-    // ステップを Completed に遷移
     {
         let s = state.steps.entry(step_id.to_string()).or_default();
         s.status = StepStatus::Completed;
         s.completed_at = Some(Utc::now());
     }
 
-    // 並列サブステップなら親を同期
     if let Some(parent_id) = dag::parent_of(step_id) {
-        state.sync_parallel_parent(parent_id, wf);
+        state.sync_parallel_parent(parent_id, wf)?;
     }
 
     save_state(cwd, &state)?;
@@ -233,32 +219,26 @@ fn cmd_complete(cwd: &PathBuf, step_id: &str) -> Result<String> {
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-// ─── resume ─────────────────────────────────────────────────────────────────
-
 fn cmd_resume(cwd: &PathBuf) -> Result<String> {
     let config = load_config(cwd)?;
     let state = load_state(cwd)?
-        .context("実行中のワークフローがありません")?;
+        .context("no workflow in progress")?;
     let wf = config.workflows.get(&state.workflow)
-        .with_context(|| format!("ワークフロー '{}' が見つかりません", state.workflow))?;
+        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
     let output = executor::build_next(wf, &state, &config);
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-// ─── status ─────────────────────────────────────────────────────────────────
-
 fn cmd_status(cwd: &PathBuf) -> Result<String> {
     let config = load_config(cwd)?;
     let state = load_state(cwd)?
-        .context("実行中のワークフローがありません")?;
+        .context("no workflow in progress")?;
     let wf = config.workflows.get(&state.workflow)
-        .with_context(|| format!("ワークフロー '{}' が見つかりません", state.workflow))?;
+        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
     Ok(serde_json::to_string_pretty(&build_status(&state, wf))?)
 }
-
-// ─── validate ───────────────────────────────────────────────────────────────
 
 fn cmd_validate(cwd: &PathBuf) -> Result<String> {
     match load_config(cwd) {
@@ -278,8 +258,6 @@ fn cmd_validate(cwd: &PathBuf) -> Result<String> {
     }
 }
 
-// ─── list ───────────────────────────────────────────────────────────────────
-
 fn cmd_list(cwd: &PathBuf) -> Result<String> {
     let config = load_config(cwd)?;
     let mut items: Vec<WorkflowListItem> = config.workflows.iter().map(|(slug, wf)| {
@@ -294,12 +272,10 @@ fn cmd_list(cwd: &PathBuf) -> Result<String> {
     Ok(serde_json::to_string_pretty(&items)?)
 }
 
-// ─── hook ───────────────────────────────────────────────────────────────────
-
 fn cmd_hook(cwd: &PathBuf, event_type: &str, _adapter: &str) -> Result<String> {
     let input = read_stdin().unwrap_or_default();
 
-    // フックはエラーで落としてはいけないため、エラーは無視して空を返す
+    // Hook errors must not crash the process; return empty on failure.
     let result: Option<String> = match event_type {
         "post-bash" => {
             let _ = hook_handler::handle_post_bash(cwd, &input);
@@ -318,8 +294,6 @@ fn cmd_hook(cwd: &PathBuf, event_type: &str, _adapter: &str) -> Result<String> {
 
     Ok(result.unwrap_or_default())
 }
-
-// ─── helpers ────────────────────────────────────────────────────────────────
 
 fn read_stdin() -> Result<String> {
     let mut buf = String::new();
@@ -360,7 +334,7 @@ fn append_checklist(cwd: &PathBuf, stdout: &str) -> Result<()> {
     use chrono::Local;
     let path = cwd.join(".workflow/checklist.md");
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let entry = format!("## テスト実行: {}\n\n```\n{}\n```\n\n", timestamp, stdout);
+    let entry = format!("## Test run: {}\n\n```\n{}\n```\n\n", timestamp, stdout);
     let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
     existing.push_str(&entry);
     std::fs::write(path, existing)?;

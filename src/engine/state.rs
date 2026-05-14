@@ -1,24 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use crate::config::types::Workflow;
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StepStatus {
+    #[default]
     Pending,
     InProgress,
     Completed,
     Failed,
-}
-
-impl Default for StepStatus {
-    fn default() -> Self {
-        StepStatus::Pending
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -27,7 +21,7 @@ pub struct StepState {
     pub status: StepStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
-    /// gate: true の run アクションが実行・報告済みかどうか
+    /// Whether a gate:true run action has been executed and recorded.
     #[serde(default)]
     pub gate_recorded: bool,
     #[serde(default)]
@@ -48,7 +42,7 @@ pub struct WorkflowState {
     pub session_id: String,
     pub workflow: String,
     pub started_at: DateTime<Utc>,
-    /// キー: step_id（並列サブステップは "parent_id/sub_id" 形式）
+    /// Keys: step_id for normal steps; "parent_id/sub_id" for parallel sub-steps.
     pub steps: HashMap<String, StepState>,
 }
 
@@ -71,15 +65,15 @@ impl WorkflowState {
         }
     }
 
-    /// 並列親ステップのステータスをサブステップから導出して同期する
-    pub fn sync_parallel_parent(&mut self, parent_id: &str, wf: &Workflow) {
+    /// Derives parent step status from sub-step statuses and updates it in place.
+    pub fn sync_parallel_parent(&mut self, parent_id: &str, wf: &Workflow) -> Result<()> {
         let parent_step = match wf.steps.iter().find(|s| s.id == parent_id) {
             Some(s) => s,
-            None => return,
+            None => return Ok(()),
         };
         let parallel = match &parent_step.parallel {
             Some(p) => p,
-            None => return,
+            None => return Ok(()),
         };
 
         let all_completed = parallel.iter().all(|sub| {
@@ -105,30 +99,65 @@ impl WorkflowState {
                 parent.started_at = Some(Utc::now());
             }
         }
+        Ok(())
     }
 }
 
-pub fn load_state(cwd: &Path) -> Result<Option<WorkflowState>> {
-    let path = cwd.join(".workflow/state.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = std::fs::read_to_string(&path)?;
-    Ok(Some(serde_json::from_str(&content)?))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::{Step, SubStep, Workflow};
 
-pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
-    let dir = cwd.join(".workflow");
-    std::fs::create_dir_all(&dir)?;
-    let content = serde_json::to_string_pretty(state)?;
-    std::fs::write(dir.join("state.json"), content)?;
-    Ok(())
-}
-
-pub fn clear_state(cwd: &Path) -> Result<()> {
-    let path = cwd.join(".workflow/state.json");
-    if path.exists() {
-        std::fs::remove_file(path)?;
+    fn make_workflow_with_parallel() -> Workflow {
+        Workflow {
+            name: "test".to_string(),
+            description: None,
+            steps: vec![
+                Step {
+                    id: "parent".to_string(),
+                    name: "Parent".to_string(),
+                    description: None,
+                    actions: vec![],
+                    parallel: Some(vec![
+                        SubStep { id: "a".to_string(), name: None, description: None, actions: vec![] },
+                        SubStep { id: "b".to_string(), name: None, description: None, actions: vec![] },
+                    ]),
+                    checklist_key: None,
+                    requires: vec![],
+                },
+            ],
+        }
     }
-    Ok(())
+
+    #[test]
+    fn new_initializes_all_step_keys() {
+        let wf = make_workflow_with_parallel();
+        let state = WorkflowState::new("test", &wf);
+        assert!(state.steps.contains_key("parent"));
+        assert!(state.steps.contains_key("parent/a"));
+        assert!(state.steps.contains_key("parent/b"));
+    }
+
+    #[test]
+    fn sync_parallel_parent_completes_when_all_subs_complete() {
+        let wf = make_workflow_with_parallel();
+        let mut state = WorkflowState::new("test", &wf);
+
+        state.steps.get_mut("parent/a").unwrap().status = StepStatus::Completed;
+        state.steps.get_mut("parent/b").unwrap().status = StepStatus::Completed;
+        state.sync_parallel_parent("parent", &wf).unwrap();
+
+        assert_eq!(state.steps["parent"].status, StepStatus::Completed);
+    }
+
+    #[test]
+    fn sync_parallel_parent_in_progress_when_partial() {
+        let wf = make_workflow_with_parallel();
+        let mut state = WorkflowState::new("test", &wf);
+
+        state.steps.get_mut("parent/a").unwrap().status = StepStatus::InProgress;
+        state.sync_parallel_parent("parent", &wf).unwrap();
+
+        assert_eq!(state.steps["parent"].status, StepStatus::InProgress);
+    }
 }

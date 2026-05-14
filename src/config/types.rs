@@ -14,9 +14,9 @@ pub struct Workflow {
     pub steps: Vec<Step>,
 }
 
-/// ワークフローの1ステップ。
-/// `actions` か `parallel` のどちらか一方を持つ（両方は不可）。
-/// どちらも持たない場合は手動ステップ（Claude が description に従って作業する）。
+/// One step in a workflow.
+/// Holds either `actions` or `parallel`, never both.
+/// A step with neither is a manual step: Claude works from `description`.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Step {
     pub id: String,
@@ -44,13 +44,13 @@ pub struct SubStep {
 pub enum Action {
     Run {
         command: String,
-        /// true のとき、このアクションの実行記録が complete の必須条件になる
+        /// When true, a recorded execution of this action is required before `complete` is allowed.
         #[serde(default)]
         gate: bool,
     },
     Agent {
         prompt: String,
-        /// true のとき他のアクションと並列実行してよい
+        /// When true, this action may run in parallel with other actions.
         #[serde(default)]
         background: bool,
     },
@@ -64,4 +64,42 @@ pub enum Action {
         #[serde(default)]
         inputs: HashMap<String, String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_run_defaults_gate_to_false() {
+        let yaml = r#"type: run
+command: make test"#;
+        let action: Action = serde_yaml::from_str(yaml).unwrap();
+        match action {
+            Action::Run { gate, .. } => assert!(!gate),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn action_run_gate_true() {
+        let yaml = r#"type: run
+command: make test
+gate: true"#;
+        let action: Action = serde_yaml::from_str(yaml).unwrap();
+        match action {
+            Action::Run { gate, .. } => assert!(gate),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn step_defaults_empty_requires_and_actions() {
+        let yaml = r#"id: step1
+name: Step 1"#;
+        let step: Step = serde_yaml::from_str(yaml).unwrap();
+        assert!(step.requires.is_empty());
+        assert!(step.actions.is_empty());
+        assert!(step.parallel.is_none());
+    }
 }

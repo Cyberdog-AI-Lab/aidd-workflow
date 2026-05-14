@@ -4,8 +4,7 @@ use crate::engine::state::WorkflowState;
 use crate::protocol::output::{ActionItem, ResolvedAction, WorkflowOutput, FlowStatus};
 
 pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> WorkflowOutput {
-    let is_complete = dag::is_workflow_complete(wf, state);
-    if is_complete {
+    if dag::is_workflow_complete(wf, state) {
         return WorkflowOutput {
             session_id: state.session_id.clone(),
             workflow: state.workflow.clone(),
@@ -19,7 +18,6 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
 
     for item_id in &items {
         if let Some(sep) = item_id.find('/') {
-            // 並列サブステップ
             let parent_id = &item_id[..sep];
             let sub_id = &item_id[sep + 1..];
             let parent_step = wf.steps.iter().find(|s| s.id == parent_id).unwrap();
@@ -48,7 +46,6 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
                 }
             }
         } else {
-            // 通常ステップ
             let step = wf.steps.iter().find(|s| s.id == *item_id).unwrap();
             if step.actions.is_empty() && step.parallel.is_none() {
                 actions.push(ActionItem {
@@ -108,4 +105,109 @@ fn resolve_template(s: &str, config: &Config) -> String {
         result = result.replace(&format!("{{{{commands.{}}}}}", key), value);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::{Action, Config, Step, Workflow};
+    use crate::engine::state::{WorkflowState, StepStatus};
+    use std::collections::HashMap;
+
+    fn config_with_test_cmd(cmd: &str) -> Config {
+        let mut commands = HashMap::new();
+        commands.insert("test".to_string(), cmd.to_string());
+        Config { commands, workflows: HashMap::new() }
+    }
+
+    fn workflow_with_run_action() -> Workflow {
+        Workflow {
+            name: "test".to_string(),
+            description: None,
+            steps: vec![Step {
+                id: "run".to_string(),
+                name: "Run".to_string(),
+                description: None,
+                actions: vec![Action::Run {
+                    command: "{{commands.test}}".to_string(),
+                    gate: false,
+                }],
+                parallel: None,
+                checklist_key: None,
+                requires: vec![],
+            }],
+        }
+    }
+
+    fn workflow_manual() -> Workflow {
+        Workflow {
+            name: "test".to_string(),
+            description: None,
+            steps: vec![Step {
+                id: "design".to_string(),
+                name: "Design".to_string(),
+                description: Some("Write the design doc".to_string()),
+                actions: vec![],
+                parallel: None,
+                checklist_key: Some("design".to_string()),
+                requires: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn resolve_template_substitutes_command() {
+        let config = config_with_test_cmd("make test");
+        let result = resolve_template("{{commands.test}}", &config);
+        assert_eq!(result, "make test");
+    }
+
+    #[test]
+    fn resolve_template_leaves_unknown_key() {
+        let config = config_with_test_cmd("make test");
+        let result = resolve_template("{{commands.build}}", &config);
+        assert_eq!(result, "{{commands.build}}");
+    }
+
+    #[test]
+    fn build_next_returns_run_action_with_resolved_command() {
+        let wf = workflow_with_run_action();
+        let config = config_with_test_cmd("make test");
+        let state = WorkflowState::new("test", &wf);
+
+        let output = build_next(&wf, &state, &config);
+        assert_eq!(output.actions.len(), 1);
+        match &output.actions[0].action {
+            ResolvedAction::Run { command, .. } => assert_eq!(command, "make test"),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn build_next_returns_manual_for_no_action_step() {
+        let wf = workflow_manual();
+        let config = config_with_test_cmd("make test");
+        let state = WorkflowState::new("test", &wf);
+
+        let output = build_next(&wf, &state, &config);
+        assert_eq!(output.actions.len(), 1);
+        match &output.actions[0].action {
+            ResolvedAction::Manual { checklist_key, .. } => {
+                assert_eq!(checklist_key.as_deref(), Some("design"));
+            }
+            _ => panic!("expected Manual"),
+        }
+    }
+
+    #[test]
+    fn build_next_returns_completed_when_all_done() {
+        let wf = workflow_with_run_action();
+        let config = config_with_test_cmd("make test");
+        let mut state = WorkflowState::new("test", &wf);
+        state.steps.get_mut("run").unwrap().status = StepStatus::Completed;
+
+        let output = build_next(&wf, &state, &config);
+        assert!(matches!(output.status, FlowStatus::Completed));
+        assert!(output.actions.is_empty());
+    }
 }

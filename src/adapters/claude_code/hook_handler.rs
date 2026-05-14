@@ -4,11 +4,12 @@ use serde_json::Value;
 use std::path::Path;
 use crate::config::loader::load_config;
 use crate::config::types::Action;
-use crate::engine::state::{load_state, save_state, ActionReport, StepStatus};
+use crate::engine::state::{ActionReport, StepStatus};
+use crate::engine::store::{load_state, save_state};
 use crate::engine::gate::hook_check_any_blocked;
 
-/// Claude Code の PostToolUse(Bash) フック
-/// テストコマンド実行を検出して checklist.md と state.json に記録する
+/// Claude Code PostToolUse(Bash) hook.
+/// Detects test command execution and records it in checklist.md and state.json.
 pub fn handle_post_bash(cwd: &Path, hook_json: &str) -> Result<()> {
     let v: Value = serde_json::from_str(hook_json)?;
     let command = v["tool_input"]["command"].as_str().unwrap_or("");
@@ -16,7 +17,7 @@ pub fn handle_post_bash(cwd: &Path, hook_json: &str) -> Result<()> {
 
     let config = match load_config(cwd) {
         Ok(c) => c,
-        Err(_) => return Ok(()), // config なし = 対象外プロジェクト
+        Err(_) => return Ok(()),
     };
     let test_cmd = config.commands.get("test").map(|s| s.as_str()).unwrap_or("make test");
 
@@ -24,17 +25,15 @@ pub fn handle_post_bash(cwd: &Path, hook_json: &str) -> Result<()> {
         return Ok(());
     }
 
-    // checklist.md に追記
     let checklist_path = cwd.join(".workflow/checklist.md");
     if cwd.join(".workflow").exists() {
         let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let entry = format!("## テスト実行: {}\n\n```\n{}\n```\n\n", timestamp, stdout);
+        let entry = format!("## Test run: {}\n\n```\n{}\n```\n\n", timestamp, stdout);
         let mut existing = std::fs::read_to_string(&checklist_path).unwrap_or_default();
         existing.push_str(&entry);
         std::fs::write(&checklist_path, existing)?;
     }
 
-    // state.json を更新: in_progress で gate: true アクションを持つステップに記録
     let mut state = match load_state(cwd)? {
         Some(s) => s,
         None => return Ok(()),
@@ -83,8 +82,8 @@ pub fn handle_post_bash(cwd: &Path, hook_json: &str) -> Result<()> {
     Ok(())
 }
 
-/// Claude Code の PreToolUse(TaskUpdate) フック
-/// in_progress ステップに gate 未実行がある場合はブロック JSON を出力する
+/// Claude Code PreToolUse(TaskUpdate) hook.
+/// Outputs a block JSON if any in-progress step has an unrecorded gate action.
 pub fn handle_pre_taskupdate(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
     let v: Value = serde_json::from_str(hook_json)?;
     let status = v["tool_input"]["status"].as_str().unwrap_or("");
@@ -115,8 +114,8 @@ pub fn handle_pre_taskupdate(cwd: &Path, hook_json: &str) -> Result<Option<Strin
     Ok(None)
 }
 
-/// Claude Code の PostToolUse(Edit/Write) フック
-/// config.yml 編集後にスキーマ検証警告を出力する
+/// Claude Code PostToolUse(Edit/Write) hook.
+/// Outputs a schema warning when config.yml fails validation after an edit.
 pub fn handle_post_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
     let v: Value = serde_json::from_str(hook_json)?;
     let file_path = v["tool_input"]["file_path"].as_str().unwrap_or("");
@@ -128,7 +127,7 @@ pub fn handle_post_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
     match load_config(cwd) {
         Ok(_) => Ok(None),
         Err(e) => Ok(Some(format!(
-            "[SCHEMA WARNING] config.yml の検証エラー: {}\n[SCHEMA WARNING] config.yml を確認して自己修正してください",
+            "[SCHEMA WARNING] config.yml validation error: {}\n[SCHEMA WARNING] Please review and fix config.yml",
             e
         ))),
     }

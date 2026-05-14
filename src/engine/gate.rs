@@ -6,9 +6,8 @@ pub struct GateResult {
     pub reason: Option<String>,
 }
 
-/// step_id のステップを completed に遷移させてよいか確認する
+/// Checks whether the given step can transition to Completed.
 pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult {
-    // サブステップの場合は親ステップのコンフィグを探す
     let (cfg_step_id, sub_id) = if let Some(idx) = step_id.find('/') {
         (&step_id[..idx], Some(&step_id[idx + 1..]))
     } else {
@@ -19,11 +18,11 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult 
         Some(s) => s,
         None => return GateResult {
             allowed: false,
-            reason: Some(format!("ステップ '{}' が config.yml に見つかりません", step_id)),
+            reason: Some(format!("step '{}' not found in config.yml", step_id)),
         },
     };
 
-    // requires チェック（並列サブステップは requires を持たない）
+    // requires check (parallel sub-steps do not have their own requires)
     if sub_id.is_none() {
         for req in &step.requires {
             let met = state.steps.get(req)
@@ -33,7 +32,7 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult 
                 return GateResult {
                     allowed: false,
                     reason: Some(format!(
-                        "ステップ '{}' は '{}' が完了してから実行できます",
+                        "step '{}' cannot complete until '{}' is done",
                         step_id, req
                     )),
                 };
@@ -41,14 +40,13 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult 
         }
     }
 
-    // gate アクションのチェック
     let actions: &[Action] = if let Some(sub) = sub_id {
         let parallel = step.parallel.as_deref().unwrap_or(&[]);
         match parallel.iter().find(|s| s.id == sub) {
             Some(s) => &s.actions,
             None => return GateResult {
                 allowed: false,
-                reason: Some(format!("サブステップ '{}' が見つかりません", step_id)),
+                reason: Some(format!("sub-step '{}' not found", step_id)),
             },
         }
     } else {
@@ -64,7 +62,7 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult 
             return GateResult {
                 allowed: false,
                 reason: Some(format!(
-                    "gate チェック失敗: ステップ '{}' の gate アクションが未実行です。先にコマンドを実行してください",
+                    "gate check failed: gate action for step '{}' has not been executed yet",
                     step_id
                 )),
             };
@@ -74,8 +72,7 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult 
     GateResult { allowed: true, reason: None }
 }
 
-/// フック経由でのゲートチェック（in_progress の全ステップを確認）
-/// ブロックすべき理由があれば Some(reason) を返す
+/// Used by hooks: returns a block reason if any in-progress step has an unrecorded gate action.
 pub fn hook_check_any_blocked(wf: &Workflow, state: &WorkflowState) -> Option<String> {
     for step in &wf.steps {
         let actions_to_check: Vec<&[Action]> = if let Some(parallel) = &step.parallel {
@@ -105,11 +102,130 @@ pub fn hook_check_any_blocked(wf: &Workflow, state: &WorkflowState) -> Option<St
 
             if is_active && !recorded {
                 return Some(format!(
-                    "gate チェック失敗: ステップ '{}' の gate アクションが実行されていません。先にコマンドを実行してください",
+                    "gate check failed: gate action for step '{}' has not been executed",
                     sid
                 ));
             }
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::{Action, Step, Workflow};
+    use crate::engine::state::{WorkflowState, StepStatus};
+
+    fn workflow_with_gate() -> Workflow {
+        Workflow {
+            name: "test".to_string(),
+            description: None,
+            steps: vec![
+                Step {
+                    id: "test".to_string(),
+                    name: "Test".to_string(),
+                    description: None,
+                    actions: vec![Action::Run {
+                        command: "make test".to_string(),
+                        gate: true,
+                    }],
+                    parallel: None,
+                    checklist_key: None,
+                    requires: vec![],
+                },
+            ],
+        }
+    }
+
+    fn workflow_with_requires() -> Workflow {
+        Workflow {
+            name: "test".to_string(),
+            description: None,
+            steps: vec![
+                Step {
+                    id: "a".to_string(),
+                    name: "A".to_string(),
+                    description: None,
+                    actions: vec![],
+                    parallel: None,
+                    checklist_key: None,
+                    requires: vec![],
+                },
+                Step {
+                    id: "b".to_string(),
+                    name: "B".to_string(),
+                    description: None,
+                    actions: vec![],
+                    parallel: None,
+                    checklist_key: None,
+                    requires: vec!["a".to_string()],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn gate_check_blocks_when_not_recorded() {
+        let wf = workflow_with_gate();
+        let mut state = WorkflowState::new("test", &wf);
+        state.steps.get_mut("test").unwrap().status = StepStatus::InProgress;
+
+        let result = check(&wf, &state, "test");
+        assert!(!result.allowed);
+        assert!(result.reason.unwrap().contains("gate check failed"));
+    }
+
+    #[test]
+    fn gate_check_passes_when_recorded() {
+        let wf = workflow_with_gate();
+        let mut state = WorkflowState::new("test", &wf);
+        let s = state.steps.get_mut("test").unwrap();
+        s.status = StepStatus::InProgress;
+        s.gate_recorded = true;
+
+        let result = check(&wf, &state, "test");
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn requires_check_blocks_when_dep_not_complete() {
+        let wf = workflow_with_requires();
+        let state = WorkflowState::new("test", &wf);
+
+        let result = check(&wf, &state, "b");
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn requires_check_passes_when_dep_complete() {
+        let wf = workflow_with_requires();
+        let mut state = WorkflowState::new("test", &wf);
+        state.steps.get_mut("a").unwrap().status = StepStatus::Completed;
+
+        let result = check(&wf, &state, "b");
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn hook_check_blocks_in_progress_gate_step() {
+        let wf = workflow_with_gate();
+        let mut state = WorkflowState::new("test", &wf);
+        state.steps.get_mut("test").unwrap().status = StepStatus::InProgress;
+
+        let reason = hook_check_any_blocked(&wf, &state);
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn hook_check_passes_when_gate_recorded() {
+        let wf = workflow_with_gate();
+        let mut state = WorkflowState::new("test", &wf);
+        let s = state.steps.get_mut("test").unwrap();
+        s.status = StepStatus::InProgress;
+        s.gate_recorded = true;
+
+        let reason = hook_check_any_blocked(&wf, &state);
+        assert!(reason.is_none());
+    }
 }
