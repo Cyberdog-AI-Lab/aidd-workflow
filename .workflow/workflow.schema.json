@@ -76,6 +76,11 @@
         "actions": {
           "type": "array",
           "items": { "$ref": "#/definitions/action" }
+        },
+        "requires": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "完了に必要な他サブステップの id（並列ブロック内依存）"
         }
       }
     },

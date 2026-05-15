@@ -31,7 +31,10 @@ workflows:
       - id: test
         name: テスト実行
         description: "make test を実行してテストがパスすることを確認する（ゲート：テスト実行記録が必須）"
-        gate: test
+        actions:
+          - type: run
+            command: "{{commands.test}}"
+            gate: true
 
       - id: complete
         name: 完了判定
@@ -54,7 +57,10 @@ workflows:
       - id: test
         name: テスト実行
         description: "make test を実行してテストがパスすることを確認する（ゲート：テスト実行記録が必須）"
-        gate: test
+        actions:
+          - type: run
+            command: "{{commands.test}}"
+            gate: true
 
       - id: complete
         name: 完了判定
