@@ -36,7 +36,7 @@
 │  │  config 層   │ │  engine 層    │ │  adapters 層     │ │
 │  │  YAML パース │ │  DAG 評価     │ │  claude-code     │ │
 │  │  型安全な定義│ │  状態管理     │ │  (将来) cursor   │ │
-│  │  バリデーション│ │  ゲートチェック│ │  (将来) standalone│ │
+│  │  バリデーション│ │  ゲートチェック│ │  standalone      │ │
 │  └──────────────┘ └───────────────┘ └──────────────────┘ │
 └─────────────┬────────────────────────────────────────────┘
               │  ファイル I/O
@@ -65,8 +65,10 @@ aidd-workflow/
 │   │   ├── gate.rs                      gate 条件チェック（Pure）
 │   │   └── executor.rs                  next_actions の構築・parallel フラグ付与（Pure）
 │   ├── adapters/
-│   │   └── claude_code/
-│   │       └── hook_handler.rs          Claude Code フック処理（Shell）
+│   │   ├── claude_code/
+│   │   │   └── hook_handler.rs          Claude Code フック処理（Shell）
+│   │   └── standalone/
+│   │       └── runner.rs                run_command / call_anthropic_api（Shell）
 │   └── protocol/
 │       ├── input.rs                     report コマンドの stdin 型（Pure）
 │       └── output.rs                    JSON 出力型定義（Pure）
@@ -151,15 +153,16 @@ workflows:
 ```
 workflow-runner [--adapter <name>] [--cwd <path>] <command>
 
-start <workflow>   ワークフロー開始 → 最初の actions を JSON で返す（status: "started"）
-next               次の actions を JSON で返す
-report             アクション実行結果を記録（stdin: JSON）
-complete <step-id> ステップ完了（ゲートチェック付き）→ 次の actions を返す
-resume             中断ワークフローの再開情報を返す
-status             現在の実行状態を JSON で返す（並列サブステップも含む）
-validate           config.yml を検証する
-list               ワークフロー一覧を返す
-hook <event-type>  Claude Code フックイベントを処理（stdin: hook JSON）
+start <workflow>        ワークフロー開始 → 最初の actions を JSON で返す（status: "started"）
+next                   次の actions を JSON で返す
+report                 アクション実行結果を記録（stdin: JSON）
+complete <step-id>     ステップ完了（ゲートチェック付き）→ 次の actions を返す
+resume                 中断ワークフローの再開情報を返す
+status                 現在の実行状態を JSON で返す（並列サブステップも含む）
+validate               config.yml を検証する
+list                   ワークフロー一覧を返す
+hook <event-type>      Claude Code フックイベントを処理（stdin: hook JSON）
+exec-step <step-id>    ステップの run/agent アクションを直接実行（standalone 専用）
 ```
 
 ### スキルとの通信フロー
@@ -409,11 +412,27 @@ make test  (cargo test)
 失敗時: exit 1 → Claude にエラーとして通知
 ```
 
+### `standalone` アダプター
+
+AI ツールなしでワークフローを自律実行するアダプター。CI/CD や自動化スクリプトでの利用を想定。
+
+```bash
+workflow-runner --adapter standalone exec-step <step-id>
+```
+
+| アクション型 | 実行方法 |
+|-------------|---------|
+| `run` | `std::process::Command` でシェルコマンドを直接実行 |
+| `agent` | Anthropic Messages API（reqwest::blocking）呼び出し。`ANTHROPIC_API_KEY` 環境変数が必要 |
+| `skill` / `workflow` | 未対応（エラーを返す） |
+
+`exec-step` は report と complete を内部で自動実行するため、呼び出し側でのロジックが不要。
+コマンドが非 0 終了した時点でステップを中断し、エラーを返す。
+
 ### 将来の拡張
 
 | アダプター | 概要 |
 |-----------|------|
-| `standalone` | AI ツールなし。`run` を `std::process::Command` で直接実行、`agent` を Anthropic API で実行 |
 | `cursor` | Cursor の拡張機構に対応（フックのイベント形式が異なる） |
 | `generic` | 設定ファイルで任意の AI ツールに対応 |
 
@@ -430,6 +449,7 @@ make test  (cargo test)
 | `anyhow` | 1 | エラーハンドリング |
 | `uuid` | 1 | セッション ID 生成（v4） |
 | `chrono` | 0.4 | タイムスタンプ（UTC/ローカル） |
+| `reqwest` | 0.12 | Anthropic API HTTP クライアント（blocking feature） |
 | `tempfile` | 3 | テスト用一時ディレクトリ（dev-dependency） |
 
 ---
@@ -463,9 +483,12 @@ make test  (cargo test)
 - [x] `.rs` 編集後の自動品質チェックフック（fmt / lint / test）
 - [x] 42 ユニットテスト（全パス）
 
-### Phase 3 — 予定
+### Phase 3 — 完了
 
-- [ ] `standalone` アダプター（`run` を直接実行、`agent` を Anthropic API 呼び出し）
+- [x] `standalone` アダプター（`run` を `std::process::Command` で直接実行、`agent` を Anthropic API 呼び出し）
+- [x] `exec-step <step-id>` CLI サブコマンド（report + complete を自動処理）
+- [x] `reqwest` 0.12 (blocking) 追加
+- [x] 46 ユニットテスト（全パス）
 
 ### Phase 4 — 予定
 

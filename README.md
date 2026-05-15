@@ -62,6 +62,19 @@ commands:
 ./target/debug/workflow-runner validate              # config.yml 検証
 ```
 
+### standalone アダプターで自律実行（AI ツール不要）
+
+`exec-step` を使うと `run` / `agent` アクションを workflow-runner が直接実行する。
+
+```bash
+# ANTHROPIC_API_KEY が必要（agent アクションを使う場合）
+export ANTHROPIC_API_KEY=sk-ant-...
+
+./target/debug/workflow-runner --adapter standalone start feature
+./target/debug/workflow-runner --adapter standalone exec-step implement
+./target/debug/workflow-runner --adapter standalone exec-step test
+```
+
 ## ワークフローの追加
 
 ```
@@ -131,7 +144,9 @@ src/                             # workflow-runner（Rust）
 ├── main.rs                      CLI エントリポイント
 ├── config/                      YAML パース・型定義
 ├── engine/                      DAG 評価・状態管理・ゲートチェック
-├── adapters/claude_code/        Claude Code フック処理
+├── adapters/
+│   ├── claude_code/             Claude Code フック処理
+│   └── standalone/              run_command / call_anthropic_api
 └── protocol/                    JSON 入出力型
 
 .workflow/
@@ -153,6 +168,7 @@ src/                             # workflow-runner（Rust）
 ## 依存
 
 - Rust（`cargo build` でバイナリをビルド）
+- `ANTHROPIC_API_KEY`（standalone アダプターで `agent` アクションを使う場合のみ）
 
 ## ドキュメント
 
