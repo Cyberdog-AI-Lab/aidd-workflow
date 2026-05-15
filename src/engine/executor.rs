@@ -107,7 +107,7 @@ fn resolve(action: &Action, config: &Config) -> ResolvedAction {
     }
 }
 
-fn resolve_template(s: &str, config: &Config) -> String {
+pub fn resolve_template(s: &str, config: &Config) -> String {
     let mut result = s.to_string();
     for (key, value) in &config.commands {
         result = result.replace(&format!("{{{{commands.{}}}}}", key), value);

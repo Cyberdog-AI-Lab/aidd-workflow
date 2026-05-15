@@ -432,8 +432,9 @@ Rust バイナリが判断ロジックを持つため、スキルは「ツール
 
 ### Phase 3：standalone アダプター
 
-- [ ] `adapters/standalone/runner.rs`：`run` アクションを直接 `std::process::Command` で実行
-- [ ] `agent` アクション：Anthropic API 呼び出し（`reqwest` + `async`）
+- [x] `adapters/standalone/runner.rs`：`run` アクションを直接 `std::process::Command` で実行
+- [x] `agent` アクション：Anthropic API 呼び出し（`reqwest` + blocking）
+- [x] `exec-step <step-id>` CLI サブコマンド：run/agent アクションを自律実行し report + complete を自動処理
 
 ### Phase 4：スキーマ・CLI 安定化
 

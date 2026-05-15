@@ -10,6 +10,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use adapters::claude_code::hook_handler;
+use adapters::standalone::runner as standalone_runner;
 use config::loader::load_config;
 use engine::state::{ActionReport, StepStatus, WorkflowState};
 use engine::store::{clear_state, load_state, save_state};
@@ -60,6 +61,8 @@ enum Commands {
         /// Event type: post-bash | pre-taskupdate | post-edit
         event_type: String,
     },
+    /// Execute a step's actions directly (standalone adapter only).
+    ExecStep { step_id: String },
 }
 
 fn main() {
@@ -95,6 +98,7 @@ fn run(cmd: Commands, cwd: &Path, adapter: &str) -> Result<String> {
         Commands::Validate => cmd_validate(cwd),
         Commands::List => cmd_list(cwd),
         Commands::Hook { event_type } => cmd_hook(cwd, &event_type, adapter),
+        Commands::ExecStep { step_id } => cmd_exec_step(cwd, &step_id),
     }
 }
 
@@ -333,6 +337,115 @@ fn is_gate_action(wf: &crate::config::types::Workflow, step_id: &str, action_ind
         .get(action_index)
         .map(|a| matches!(a, Action::Run { gate: true, .. }))
         .unwrap_or(false)
+}
+
+fn cmd_exec_step(cwd: &Path, step_id: &str) -> Result<String> {
+    use crate::config::types::Action;
+
+    let config = load_config(cwd)?;
+    let state = load_state(cwd)?.context("no workflow in progress")?;
+    let wf = config
+        .workflows
+        .get(&state.workflow)
+        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
+
+    let step = wf
+        .steps
+        .iter()
+        .find(|s| s.id == step_id)
+        .with_context(|| format!("step '{}' not found in workflow", step_id))?;
+
+    let session_id = state.session_id.clone();
+
+    for (idx, action) in step.actions.iter().enumerate() {
+        let (exit_code, stdout, stderr) = match action {
+            Action::Run { command, .. } => {
+                let resolved = engine::executor::resolve_template(command, &config);
+                let result = standalone_runner::run_command(&resolved, cwd)?;
+                eprintln!("{}", result.stderr.trim_end());
+                print!("{}", result.stdout);
+                (result.exit_code, result.stdout, result.stderr)
+            }
+            Action::Agent { prompt, .. } => {
+                let text = standalone_runner::call_anthropic_api(prompt)?;
+                println!("{}", text);
+                (0, text, String::new())
+            }
+            Action::Skill { skill, .. } => {
+                anyhow::bail!(
+                    "skill action '{}' is not supported in standalone mode",
+                    skill
+                )
+            }
+            Action::Workflow { workflow, .. } => {
+                anyhow::bail!(
+                    "workflow action '{}' is not supported in standalone mode",
+                    workflow
+                )
+            }
+        };
+
+        let report = serde_json::json!({
+            "session_id": session_id,
+            "step_id": step_id,
+            "action_index": idx,
+            "action_type": action_type_name(action),
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr
+        });
+
+        let input: protocol::input::ReportInput = serde_json::from_value(report)?;
+        {
+            use chrono::Utc;
+            use engine::state::{ActionReport, StepStatus};
+            let mut st = load_state(cwd)?.context("no workflow in progress")?;
+            {
+                let s = st.steps.entry(step_id.to_string()).or_default();
+                if s.status == StepStatus::Pending {
+                    s.status = StepStatus::InProgress;
+                    s.started_at = Some(Utc::now());
+                }
+                let is_gate = is_gate_action(wf, step_id, input.action_index);
+                if is_gate {
+                    s.gate_recorded = true;
+                }
+                s.action_reports.push(ActionReport {
+                    action_index: input.action_index,
+                    action_type: input.action_type.clone(),
+                    exit_code: input.exit_code,
+                    stdout: input.stdout.clone(),
+                    recorded_at: Utc::now(),
+                });
+                if is_gate {
+                    if let Some(out) = &input.stdout {
+                        append_checklist(cwd, out)?;
+                    }
+                }
+            }
+            save_state(cwd, &st)?;
+        }
+
+        if exit_code != 0 {
+            anyhow::bail!(
+                "command exited with code {}; aborting step '{}'",
+                exit_code,
+                step_id
+            );
+        }
+    }
+
+    cmd_complete(cwd, step_id)
+}
+
+fn action_type_name(action: &crate::config::types::Action) -> &'static str {
+    use crate::config::types::Action;
+    match action {
+        Action::Run { .. } => "run",
+        Action::Agent { .. } => "agent",
+        Action::Skill { .. } => "skill",
+        Action::Workflow { .. } => "workflow",
+    }
 }
 
 fn append_checklist(cwd: &Path, stdout: &str) -> Result<()> {
