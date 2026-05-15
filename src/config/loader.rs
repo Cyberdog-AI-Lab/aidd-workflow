@@ -1,13 +1,12 @@
+use super::types::{Action, Config};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
-use anyhow::{Context, Result, bail};
-use super::types::{Config, Action};
 
 pub fn load_config(cwd: &Path) -> Result<Config> {
     let path = cwd.join(".workflow/config.yml");
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!(".workflow/config.yml not found: {}", path.display()))?;
-    let config: Config = serde_yaml::from_str(&content)
-        .context("failed to parse config.yml")?;
+    let config: Config = serde_yaml::from_str(&content).context("failed to parse config.yml")?;
     validate(&config)?;
     Ok(config)
 }
@@ -20,21 +19,23 @@ pub fn validate(config: &Config) -> Result<()> {
         if wf.steps.is_empty() {
             bail!("workflow '{}' has no steps", slug);
         }
-        let ids: std::collections::HashSet<&str> =
-            wf.steps.iter().map(|s| s.id.as_str()).collect();
+        let ids: std::collections::HashSet<&str> = wf.steps.iter().map(|s| s.id.as_str()).collect();
 
         for step in &wf.steps {
             if !step.actions.is_empty() && step.parallel.is_some() {
                 bail!(
                     "step '{}' in workflow '{}' cannot have both actions and parallel",
-                    step.id, slug
+                    step.id,
+                    slug
                 );
             }
             for req in &step.requires {
                 if !ids.contains(req.as_str()) {
                     bail!(
                         "step '{}' in workflow '{}' requires unknown step '{}'",
-                        step.id, slug, req
+                        step.id,
+                        slug,
+                        req
                     );
                 }
             }
@@ -42,7 +43,11 @@ pub fn validate(config: &Config) -> Result<()> {
             for action in &step.actions {
                 if let Action::Run { command, .. } = action {
                     if command.is_empty() {
-                        bail!("step '{}' in workflow '{}' has a run action with an empty command", step.id, slug);
+                        bail!(
+                            "step '{}' in workflow '{}' has a run action with an empty command",
+                            step.id,
+                            slug
+                        );
                     }
                 }
             }
@@ -54,7 +59,7 @@ pub fn validate(config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Config, Workflow, Step};
+    use crate::config::types::{Config, Step, Workflow};
     use std::collections::HashMap;
 
     fn minimal_config() -> Config {
@@ -71,12 +76,18 @@ mod tests {
             requires: vec![],
         };
         let mut workflows = HashMap::new();
-        workflows.insert("wf".to_string(), Workflow {
-            name: "WF".to_string(),
-            description: None,
-            steps: vec![step],
-        });
-        Config { commands, workflows }
+        workflows.insert(
+            "wf".to_string(),
+            Workflow {
+                name: "WF".to_string(),
+                description: None,
+                steps: vec![step],
+            },
+        );
+        Config {
+            commands,
+            workflows,
+        }
     }
 
     #[test]

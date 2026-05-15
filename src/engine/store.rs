@@ -1,6 +1,6 @@
-use std::path::Path;
-use anyhow::Result;
 use super::state::WorkflowState;
+use anyhow::Result;
+use std::path::Path;
 
 pub fn load_state(cwd: &Path) -> Result<Option<WorkflowState>> {
     let path = cwd.join(".workflow/state.json");
@@ -30,7 +30,7 @@ pub fn clear_state(cwd: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Workflow, Step};
+    use crate::config::types::{Step, Workflow};
     use crate::engine::state::WorkflowState;
     use tempfile::TempDir;
 
@@ -38,17 +38,15 @@ mod tests {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![
-                Step {
-                    id: "step1".to_string(),
-                    name: "Step 1".to_string(),
-                    description: None,
-                    actions: vec![],
-                    parallel: None,
-                    checklist_key: None,
-                    requires: vec![],
-                },
-            ],
+            steps: vec![Step {
+                id: "step1".to_string(),
+                name: "Step 1".to_string(),
+                description: None,
+                actions: vec![],
+                parallel: None,
+                checklist_key: None,
+                requires: vec![],
+            }],
         }
     }
 

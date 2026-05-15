@@ -1,5 +1,5 @@
-use crate::config::types::{Workflow, Action};
-use crate::engine::state::{WorkflowState, StepStatus};
+use crate::config::types::{Action, Workflow};
+use crate::engine::state::{StepStatus, WorkflowState};
 
 pub struct GateResult {
     pub allowed: bool,
@@ -16,16 +16,20 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult 
 
     let step = match wf.steps.iter().find(|s| s.id == cfg_step_id) {
         Some(s) => s,
-        None => return GateResult {
-            allowed: false,
-            reason: Some(format!("step '{}' not found in config.yml", step_id)),
-        },
+        None => {
+            return GateResult {
+                allowed: false,
+                reason: Some(format!("step '{}' not found in config.yml", step_id)),
+            }
+        }
     };
 
     // requires check (parallel sub-steps do not have their own requires)
     if sub_id.is_none() {
         for req in &step.requires {
-            let met = state.steps.get(req)
+            let met = state
+                .steps
+                .get(req)
                 .map(|s| s.status == StepStatus::Completed)
                 .unwrap_or(false);
             if !met {
@@ -44,18 +48,24 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult 
         let parallel = step.parallel.as_deref().unwrap_or(&[]);
         match parallel.iter().find(|s| s.id == sub) {
             Some(s) => &s.actions,
-            None => return GateResult {
-                allowed: false,
-                reason: Some(format!("sub-step '{}' not found", step_id)),
-            },
+            None => {
+                return GateResult {
+                    allowed: false,
+                    reason: Some(format!("sub-step '{}' not found", step_id)),
+                }
+            }
         }
     } else {
         &step.actions
     };
 
-    let has_gate = actions.iter().any(|a| matches!(a, Action::Run { gate: true, .. }));
+    let has_gate = actions
+        .iter()
+        .any(|a| matches!(a, Action::Run { gate: true, .. }));
     if has_gate {
-        let recorded = state.steps.get(step_id)
+        let recorded = state
+            .steps
+            .get(step_id)
             .map(|s| s.gate_recorded)
             .unwrap_or(false);
         if !recorded {
@@ -69,7 +79,10 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult 
         }
     }
 
-    GateResult { allowed: true, reason: None }
+    GateResult {
+        allowed: true,
+        reason: None,
+    }
 }
 
 /// Used by hooks: returns a block reason if any in-progress step has an unrecorded gate action.
@@ -82,7 +95,10 @@ pub fn hook_check_any_blocked(wf: &Workflow, state: &WorkflowState) -> Option<St
         };
 
         let step_ids: Vec<String> = if step.parallel.is_some() {
-            step.parallel.as_ref().unwrap().iter()
+            step.parallel
+                .as_ref()
+                .unwrap()
+                .iter()
                 .map(|s| format!("{}/{}", step.id, s.id))
                 .collect()
         } else {
@@ -90,7 +106,9 @@ pub fn hook_check_any_blocked(wf: &Workflow, state: &WorkflowState) -> Option<St
         };
 
         for (actions, sid) in actions_to_check.iter().zip(step_ids.iter()) {
-            let has_gate = actions.iter().any(|a| matches!(a, Action::Run { gate: true, .. }));
+            let has_gate = actions
+                .iter()
+                .any(|a| matches!(a, Action::Run { gate: true, .. }));
             if !has_gate {
                 continue;
             }
@@ -115,26 +133,24 @@ pub fn hook_check_any_blocked(wf: &Workflow, state: &WorkflowState) -> Option<St
 mod tests {
     use super::*;
     use crate::config::types::{Action, Step, Workflow};
-    use crate::engine::state::{WorkflowState, StepStatus};
+    use crate::engine::state::{StepStatus, WorkflowState};
 
     fn workflow_with_gate() -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![
-                Step {
-                    id: "test".to_string(),
-                    name: "Test".to_string(),
-                    description: None,
-                    actions: vec![Action::Run {
-                        command: "make test".to_string(),
-                        gate: true,
-                    }],
-                    parallel: None,
-                    checklist_key: None,
-                    requires: vec![],
-                },
-            ],
+            steps: vec![Step {
+                id: "test".to_string(),
+                name: "Test".to_string(),
+                description: None,
+                actions: vec![Action::Run {
+                    command: "make test".to_string(),
+                    gate: true,
+                }],
+                parallel: None,
+                checklist_key: None,
+                requires: vec![],
+            }],
         }
     }
 

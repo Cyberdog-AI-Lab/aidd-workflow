@@ -411,24 +411,24 @@ Rust バイナリが判断ロジックを持つため、スキルは「ツール
 
 ### Phase 1：Rust コア（Claude Code ターゲット）
 
-- [ ] `Cargo.toml` 作成・クレート依存定義
-- [ ] `config/types.rs`：Workflow, Step, Action の型定義（serde）
-- [ ] `config/loader.rs`：YAML 読み込み・スキーマ検証
-- [ ] `engine/state.rs`：state.json の読み書き
-- [ ] `engine/dag.rs`：depends 解析・実行可能ステップ算出
-- [ ] `engine/gate.rs`：gate 条件チェック
-- [ ] `engine/executor.rs`：next_actions 構築
-- [ ] `adapters/claude_code/`：フック JSON パース・出力フォーマット
-- [ ] `main.rs`：CLI（start / next / report / complete / hook / validate / list）
-- [ ] `workflow.schema.json` 拡張：action 型・parallel ブロック追加
-- [ ] `.claude/hooks/` 簡素化（workflow-runner 呼び出しのみ）
-- [ ] `.claude/skills/workflow-orchestrator/SKILL.md` v2 改訂
+- [x] `Cargo.toml` 作成・クレート依存定義
+- [x] `config/types.rs`：Workflow, Step, Action の型定義（serde）
+- [x] `config/loader.rs`：YAML 読み込み・スキーマ検証
+- [x] `engine/state.rs`：state.json の読み書き
+- [x] `engine/dag.rs`：depends 解析・実行可能ステップ算出
+- [x] `engine/gate.rs`：gate 条件チェック
+- [x] `engine/executor.rs`：next_actions 構築
+- [x] `adapters/claude_code/`：フック JSON パース・出力フォーマット
+- [x] `main.rs`：CLI（start / next / report / complete / hook / validate / list）
+- [x] `workflow.schema.json` 拡張：action 型・parallel ブロック追加
+- [x] `.claude/hooks/` 簡素化（workflow-runner 呼び出しのみ）
+- [x] `.claude/skills/workflow-orchestrator/SKILL.md` v2 改訂
 
 ### Phase 2：並列実行
 
-- [ ] `engine/dag.rs` 拡張：parallel ブロックのサブグラフ評価
-- [ ] `protocol/output.rs`：並列アクション群の出力形式
-- [ ] SKILL.md：`background: true` アクションの並列実行手順追加
+- [x] `engine/dag.rs` 拡張：parallel ブロックのサブグラフ評価
+- [x] `protocol/output.rs`：並列アクション群の出力形式
+- [x] SKILL.md：`background: true` アクションの並列実行手順追加
 
 ### Phase 3：standalone アダプター
 

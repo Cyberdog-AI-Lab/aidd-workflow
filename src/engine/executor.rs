@@ -1,7 +1,7 @@
-use crate::config::types::{Config, Workflow, Action};
+use crate::config::types::{Action, Config, Workflow};
 use crate::engine::dag;
 use crate::engine::state::WorkflowState;
-use crate::protocol::output::{ActionItem, ResolvedAction, WorkflowOutput, FlowStatus};
+use crate::protocol::output::{ActionItem, FlowStatus, ResolvedAction, WorkflowOutput};
 
 pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> WorkflowOutput {
     if dag::is_workflow_complete(wf, state) {
@@ -77,7 +77,11 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
     WorkflowOutput {
         session_id: state.session_id.clone(),
         workflow: state.workflow.clone(),
-        status: if actions.is_empty() { FlowStatus::Blocked } else { FlowStatus::InProgress },
+        status: if actions.is_empty() {
+            FlowStatus::Blocked
+        } else {
+            FlowStatus::InProgress
+        },
         actions,
     }
 }
@@ -115,13 +119,16 @@ fn resolve_template(s: &str, config: &Config) -> String {
 mod tests {
     use super::*;
     use crate::config::types::{Action, Config, Step, Workflow};
-    use crate::engine::state::{WorkflowState, StepStatus};
+    use crate::engine::state::{StepStatus, WorkflowState};
     use std::collections::HashMap;
 
     fn config_with_test_cmd(cmd: &str) -> Config {
         let mut commands = HashMap::new();
         commands.insert("test".to_string(), cmd.to_string());
-        Config { commands, workflows: HashMap::new() }
+        Config {
+            commands,
+            workflows: HashMap::new(),
+        }
     }
 
     fn workflow_with_run_action() -> Workflow {
@@ -205,7 +212,7 @@ mod tests {
 
     #[test]
     fn parallel_sub_step_actions_have_parallel_true() {
-        use crate::config::types::{SubStep};
+        use crate::config::types::SubStep;
         let wf = Workflow {
             name: "test".to_string(),
             description: None,
@@ -215,8 +222,26 @@ mod tests {
                 description: None,
                 actions: vec![],
                 parallel: Some(vec![
-                    SubStep { id: "x".to_string(), name: None, description: None, actions: vec![Action::Run { command: "cmd".to_string(), gate: false }], requires: vec![] },
-                    SubStep { id: "y".to_string(), name: None, description: None, actions: vec![Action::Run { command: "cmd2".to_string(), gate: false }], requires: vec![] },
+                    SubStep {
+                        id: "x".to_string(),
+                        name: None,
+                        description: None,
+                        actions: vec![Action::Run {
+                            command: "cmd".to_string(),
+                            gate: false,
+                        }],
+                        requires: vec![],
+                    },
+                    SubStep {
+                        id: "y".to_string(),
+                        name: None,
+                        description: None,
+                        actions: vec![Action::Run {
+                            command: "cmd2".to_string(),
+                            gate: false,
+                        }],
+                        requires: vec![],
+                    },
                 ]),
                 checklist_key: None,
                 requires: vec![],

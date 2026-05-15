@@ -1,7 +1,7 @@
+use crate::config::types::Workflow;
+use crate::engine::state::WorkflowState;
 use serde::Serialize;
 use std::collections::HashMap;
-use crate::engine::state::WorkflowState;
-use crate::config::types::Workflow;
 
 #[derive(Debug, Serialize)]
 pub struct WorkflowOutput {
@@ -100,18 +100,30 @@ pub struct ErrorOutput {
 pub fn build_status(state: &WorkflowState, wf: &Workflow) -> StatusOutput {
     let mut steps = Vec::new();
     for step in &wf.steps {
-        let status = state.steps.get(&step.id)
+        let status = state
+            .steps
+            .get(&step.id)
             .map(|s| format!("{:?}", s.status).to_lowercase())
             .unwrap_or_else(|| "pending".to_string());
-        steps.push(StepStatusItem { id: step.id.clone(), name: step.name.clone(), status });
+        steps.push(StepStatusItem {
+            id: step.id.clone(),
+            name: step.name.clone(),
+            status,
+        });
         if let Some(parallel) = &step.parallel {
             for sub in parallel {
                 let key = format!("{}/{}", step.id, sub.id);
-                let sub_status = state.steps.get(&key)
+                let sub_status = state
+                    .steps
+                    .get(&key)
                     .map(|s| format!("{:?}", s.status).to_lowercase())
                     .unwrap_or_else(|| "pending".to_string());
                 let sub_name = sub.name.as_deref().unwrap_or(&sub.id).to_string();
-                steps.push(StepStatusItem { id: key, name: sub_name, status: sub_status });
+                steps.push(StepStatusItem {
+                    id: key,
+                    name: sub_name,
+                    status: sub_status,
+                });
             }
         }
     }
@@ -128,7 +140,7 @@ pub fn build_status(state: &WorkflowState, wf: &Workflow) -> StatusOutput {
 mod tests {
     use super::*;
     use crate::config::types::{Step, Workflow};
-    use crate::engine::state::{WorkflowState, StepStatus};
+    use crate::engine::state::{StepStatus, WorkflowState};
 
     fn minimal_workflow() -> Workflow {
         Workflow {
@@ -167,7 +179,7 @@ mod tests {
 
     #[test]
     fn build_status_includes_parallel_sub_steps() {
-        use crate::config::types::{SubStep};
+        use crate::config::types::SubStep;
         let wf = Workflow {
             name: "test".to_string(),
             description: None,
@@ -177,8 +189,20 @@ mod tests {
                 description: None,
                 actions: vec![],
                 parallel: Some(vec![
-                    SubStep { id: "a".to_string(), name: Some("A".to_string()), description: None, actions: vec![], requires: vec![] },
-                    SubStep { id: "b".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
+                    SubStep {
+                        id: "a".to_string(),
+                        name: Some("A".to_string()),
+                        description: None,
+                        actions: vec![],
+                        requires: vec![],
+                    },
+                    SubStep {
+                        id: "b".to_string(),
+                        name: None,
+                        description: None,
+                        actions: vec![],
+                        requires: vec![],
+                    },
                 ]),
                 checklist_key: None,
                 requires: vec![],
