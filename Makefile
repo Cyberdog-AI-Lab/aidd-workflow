@@ -1,6 +1,6 @@
 # workflow-orchestrator フェーズ2実験用 Makefile
 
-.PHONY: test lint build
+.PHONY: test lint build fmt fmt-check
 
 test:
 	@echo "Running tests..."
@@ -26,7 +26,7 @@ fmt:
 	cargo fmt --all
 	@echo "✓ Formatting done"
 
-format:
+fmt-check:
 	@echo "Formatting..."
 	cargo fmt --all -- --check
 	@echo "✓ Format check passed"
