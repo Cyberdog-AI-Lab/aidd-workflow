@@ -1,5 +1,5 @@
 use crate::config::types::Workflow;
-use crate::engine::state::{WorkflowState, StepStatus};
+use crate::engine::state::{StepStatus, WorkflowState};
 
 /// Returns IDs of items that are currently executable.
 /// Normal steps return their step_id; parallel sub-steps return "parent_id/sub_id".
@@ -8,7 +8,9 @@ pub fn executable_items(wf: &Workflow, state: &WorkflowState) -> Vec<String> {
 
     for step in &wf.steps {
         let step_state = state.steps.get(&step.id);
-        let step_status = step_state.map(|s| &s.status).unwrap_or(&StepStatus::Pending);
+        let step_status = step_state
+            .map(|s| &s.status)
+            .unwrap_or(&StepStatus::Pending);
 
         if matches!(step_status, StepStatus::Completed | StepStatus::Failed) {
             continue;
@@ -21,7 +23,9 @@ pub fn executable_items(wf: &Workflow, state: &WorkflowState) -> Vec<String> {
         if let Some(parallel) = &step.parallel {
             for sub in parallel {
                 let key = format!("{}/{}", step.id, sub.id);
-                let sub_status = state.steps.get(&key)
+                let sub_status = state
+                    .steps
+                    .get(&key)
                     .map(|s| &s.status)
                     .unwrap_or(&StepStatus::Pending);
                 if !matches!(sub_status, StepStatus::Pending | StepStatus::InProgress) {
@@ -29,7 +33,9 @@ pub fn executable_items(wf: &Workflow, state: &WorkflowState) -> Vec<String> {
                 }
                 let sub_requires_met = sub.requires.iter().all(|req| {
                     let req_key = format!("{}/{}", step.id, req);
-                    state.steps.get(&req_key)
+                    state
+                        .steps
+                        .get(&req_key)
                         .map(|s| s.status == StepStatus::Completed)
                         .unwrap_or(false)
                 });
@@ -37,10 +43,8 @@ pub fn executable_items(wf: &Workflow, state: &WorkflowState) -> Vec<String> {
                     items.push(key);
                 }
             }
-        } else {
-            if matches!(step_status, StepStatus::Pending | StepStatus::InProgress) {
-                items.push(step.id.clone());
-            }
+        } else if matches!(step_status, StepStatus::Pending | StepStatus::InProgress) {
+            items.push(step.id.clone());
         }
     }
 
@@ -49,7 +53,9 @@ pub fn executable_items(wf: &Workflow, state: &WorkflowState) -> Vec<String> {
 
 fn requires_met(wf: &Workflow, state: &WorkflowState, requires: &[String]) -> bool {
     requires.iter().all(|req| {
-        state.steps.get(req)
+        state
+            .steps
+            .get(req)
             .map(|s| s.status == StepStatus::Completed)
             .unwrap_or(false)
             || wf.steps.iter().all(|s| s.id != *req) // unknown step: pass through
@@ -58,7 +64,9 @@ fn requires_met(wf: &Workflow, state: &WorkflowState, requires: &[String]) -> bo
 
 pub fn is_workflow_complete(wf: &Workflow, state: &WorkflowState) -> bool {
     wf.steps.iter().all(|step| {
-        state.steps.get(&step.id)
+        state
+            .steps
+            .get(&step.id)
             .map(|s| s.status == StepStatus::Completed)
             .unwrap_or(false)
     })
@@ -73,7 +81,7 @@ pub fn parent_of(step_id: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::config::types::{Step, SubStep, Workflow};
-    use crate::engine::state::{WorkflowState, StepStatus};
+    use crate::engine::state::{StepStatus, WorkflowState};
 
     fn make_linear_workflow() -> Workflow {
         Workflow {
@@ -106,20 +114,30 @@ mod tests {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![
-                Step {
-                    id: "p".to_string(),
-                    name: "Parallel".to_string(),
-                    description: None,
-                    actions: vec![],
-                    parallel: Some(vec![
-                        SubStep { id: "x".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
-                        SubStep { id: "y".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
-                    ]),
-                    checklist_key: None,
-                    requires: vec![],
-                },
-            ],
+            steps: vec![Step {
+                id: "p".to_string(),
+                name: "Parallel".to_string(),
+                description: None,
+                actions: vec![],
+                parallel: Some(vec![
+                    SubStep {
+                        id: "x".to_string(),
+                        name: None,
+                        description: None,
+                        actions: vec![],
+                        requires: vec![],
+                    },
+                    SubStep {
+                        id: "y".to_string(),
+                        name: None,
+                        description: None,
+                        actions: vec![],
+                        requires: vec![],
+                    },
+                ]),
+                checklist_key: None,
+                requires: vec![],
+            }],
         }
     }
 
@@ -183,20 +201,30 @@ mod tests {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![
-                Step {
-                    id: "p".to_string(),
-                    name: "Parallel".to_string(),
-                    description: None,
-                    actions: vec![],
-                    parallel: Some(vec![
-                        SubStep { id: "x".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
-                        SubStep { id: "y".to_string(), name: None, description: None, actions: vec![], requires: vec!["x".to_string()] },
-                    ]),
-                    checklist_key: None,
-                    requires: vec![],
-                },
-            ],
+            steps: vec![Step {
+                id: "p".to_string(),
+                name: "Parallel".to_string(),
+                description: None,
+                actions: vec![],
+                parallel: Some(vec![
+                    SubStep {
+                        id: "x".to_string(),
+                        name: None,
+                        description: None,
+                        actions: vec![],
+                        requires: vec![],
+                    },
+                    SubStep {
+                        id: "y".to_string(),
+                        name: None,
+                        description: None,
+                        actions: vec![],
+                        requires: vec!["x".to_string()],
+                    },
+                ]),
+                checklist_key: None,
+                requires: vec![],
+            }],
         }
     }
 

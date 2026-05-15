@@ -1,31 +1,29 @@
+mod adapters;
 mod config;
 mod engine;
-mod adapters;
 mod protocol;
 
-use std::io::{self, Read};
-use std::path::PathBuf;
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
 use chrono::Utc;
+use clap::{Parser, Subcommand};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 
+use adapters::claude_code::hook_handler;
 use config::loader::load_config;
-use engine::state::{
-    WorkflowState, StepStatus, ActionReport,
-};
-use engine::store::{load_state, save_state, clear_state};
-use engine::{dag, gate, executor};
+use engine::state::{ActionReport, StepStatus, WorkflowState};
+use engine::store::{clear_state, load_state, save_state};
+use engine::{dag, executor, gate};
 use protocol::{
     input::ReportInput,
-    output::{
-        build_status, CompleteOutput, ErrorOutput,
-        WorkflowListItem, FlowStatus,
-    },
+    output::{build_status, CompleteOutput, ErrorOutput, FlowStatus, WorkflowListItem},
 };
-use adapters::claude_code::hook_handler;
 
 #[derive(Parser)]
-#[command(name = "workflow-runner", about = "Workflow execution engine for AI tools")]
+#[command(
+    name = "workflow-runner",
+    about = "Workflow execution engine for AI tools"
+)]
 struct Cli {
     /// Adapter name (claude-code | standalone)
     #[arg(long, default_value = "claude-code")]
@@ -42,17 +40,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Start a workflow and return the first set of actions.
-    Start {
-        workflow: String,
-    },
+    Start { workflow: String },
     /// Return the next set of actions from the current state.
     Next,
     /// Record an action execution result (stdin: JSON).
     Report,
     /// Mark a step as complete (with gate check).
-    Complete {
-        step_id: String,
-    },
+    Complete { step_id: String },
     /// Return resume information for an interrupted workflow.
     Resume,
     /// Return the current execution state as JSON.
@@ -80,14 +74,17 @@ fn main() {
             }
         }
         Err(e) => {
-            let out = serde_json::to_string(&ErrorOutput { error: e.to_string() }).unwrap();
+            let out = serde_json::to_string(&ErrorOutput {
+                error: e.to_string(),
+            })
+            .unwrap();
             eprintln!("{}", out);
             std::process::exit(1);
         }
     }
 }
 
-fn run(cmd: Commands, cwd: &PathBuf, adapter: &str) -> Result<String> {
+fn run(cmd: Commands, cwd: &Path, adapter: &str) -> Result<String> {
     match cmd {
         Commands::Start { workflow } => cmd_start(cwd, &workflow),
         Commands::Next => cmd_next(cwd),
@@ -101,39 +98,47 @@ fn run(cmd: Commands, cwd: &PathBuf, adapter: &str) -> Result<String> {
     }
 }
 
-fn cmd_start(cwd: &PathBuf, workflow_name: &str) -> Result<String> {
+fn cmd_start(cwd: &Path, workflow_name: &str) -> Result<String> {
     let config = load_config(cwd)?;
-    let wf = config.workflows.get(workflow_name)
+    let wf = config
+        .workflows
+        .get(workflow_name)
         .with_context(|| format!("workflow '{}' not found in config.yml", workflow_name))?;
 
     let state = WorkflowState::new(workflow_name, wf);
     save_state(cwd, &state)?;
 
-    let output = executor::build_next(wf, &state, &config);
+    let mut output = executor::build_next(wf, &state, &config);
+    if matches!(output.status, FlowStatus::InProgress) {
+        output.status = FlowStatus::Started;
+    }
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn cmd_next(cwd: &PathBuf) -> Result<String> {
+fn cmd_next(cwd: &Path) -> Result<String> {
     let config = load_config(cwd)?;
     let state = load_state(cwd)?
         .context("no workflow in progress; run `workflow-runner start <workflow>` first")?;
-    let wf = config.workflows.get(&state.workflow)
+    let wf = config
+        .workflows
+        .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found in config.yml", state.workflow))?;
 
     let output = executor::build_next(wf, &state, &config);
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn cmd_report(cwd: &PathBuf) -> Result<String> {
+fn cmd_report(cwd: &Path) -> Result<String> {
     let input_str = read_stdin()?;
-    let input: ReportInput = serde_json::from_str(&input_str)
-        .context("report stdin is not valid JSON")?;
+    let input: ReportInput =
+        serde_json::from_str(&input_str).context("report stdin is not valid JSON")?;
 
     let config = load_config(cwd)?;
-    let mut state = load_state(cwd)?
-        .context("no workflow in progress")?;
+    let mut state = load_state(cwd)?.context("no workflow in progress")?;
 
-    let wf = config.workflows.get(&state.workflow)
+    let wf = config
+        .workflows
+        .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
     {
@@ -175,11 +180,12 @@ fn cmd_report(cwd: &PathBuf) -> Result<String> {
     Ok(out.to_string())
 }
 
-fn cmd_complete(cwd: &PathBuf, step_id: &str) -> Result<String> {
+fn cmd_complete(cwd: &Path, step_id: &str) -> Result<String> {
     let config = load_config(cwd)?;
-    let mut state = load_state(cwd)?
-        .context("no workflow in progress")?;
-    let wf = config.workflows.get(&state.workflow)
+    let mut state = load_state(cwd)?.context("no workflow in progress")?;
+    let wf = config
+        .workflows
+        .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
     let gate_result = gate::check(wf, &state, step_id);
@@ -219,28 +225,30 @@ fn cmd_complete(cwd: &PathBuf, step_id: &str) -> Result<String> {
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn cmd_resume(cwd: &PathBuf) -> Result<String> {
+fn cmd_resume(cwd: &Path) -> Result<String> {
     let config = load_config(cwd)?;
-    let state = load_state(cwd)?
-        .context("no workflow in progress")?;
-    let wf = config.workflows.get(&state.workflow)
+    let state = load_state(cwd)?.context("no workflow in progress")?;
+    let wf = config
+        .workflows
+        .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
     let output = executor::build_next(wf, &state, &config);
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn cmd_status(cwd: &PathBuf) -> Result<String> {
+fn cmd_status(cwd: &Path) -> Result<String> {
     let config = load_config(cwd)?;
-    let state = load_state(cwd)?
-        .context("no workflow in progress")?;
-    let wf = config.workflows.get(&state.workflow)
+    let state = load_state(cwd)?.context("no workflow in progress")?;
+    let wf = config
+        .workflows
+        .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
     Ok(serde_json::to_string_pretty(&build_status(&state, wf))?)
 }
 
-fn cmd_validate(cwd: &PathBuf) -> Result<String> {
+fn cmd_validate(cwd: &Path) -> Result<String> {
     match load_config(cwd) {
         Ok(config) => {
             let wf_count = config.workflows.len();
@@ -258,21 +266,23 @@ fn cmd_validate(cwd: &PathBuf) -> Result<String> {
     }
 }
 
-fn cmd_list(cwd: &PathBuf) -> Result<String> {
+fn cmd_list(cwd: &Path) -> Result<String> {
     let config = load_config(cwd)?;
-    let mut items: Vec<WorkflowListItem> = config.workflows.iter().map(|(slug, wf)| {
-        WorkflowListItem {
+    let mut items: Vec<WorkflowListItem> = config
+        .workflows
+        .iter()
+        .map(|(slug, wf)| WorkflowListItem {
             slug: slug.clone(),
             name: wf.name.clone(),
             description: wf.description.clone(),
             step_count: wf.steps.len(),
-        }
-    }).collect();
+        })
+        .collect();
     items.sort_by(|a, b| a.slug.cmp(&b.slug));
     Ok(serde_json::to_string_pretty(&items)?)
 }
 
-fn cmd_hook(cwd: &PathBuf, event_type: &str, _adapter: &str) -> Result<String> {
+fn cmd_hook(cwd: &Path, event_type: &str, _adapter: &str) -> Result<String> {
     let input = read_stdin().unwrap_or_default();
 
     // Hook errors must not crash the process; return empty on failure.
@@ -281,14 +291,8 @@ fn cmd_hook(cwd: &PathBuf, event_type: &str, _adapter: &str) -> Result<String> {
             let _ = hook_handler::handle_post_bash(cwd, &input);
             None
         }
-        "pre-taskupdate" => {
-            hook_handler::handle_pre_taskupdate(cwd, &input)
-                .unwrap_or(None)
-        }
-        "post-edit" => {
-            hook_handler::handle_post_edit(cwd, &input)
-                .unwrap_or(None)
-        }
+        "pre-taskupdate" => hook_handler::handle_pre_taskupdate(cwd, &input).unwrap_or(None),
+        "post-edit" => hook_handler::handle_post_edit(cwd, &input).unwrap_or(None),
         _ => None,
     };
 
@@ -325,12 +329,13 @@ fn is_gate_action(wf: &crate::config::types::Workflow, step_id: &str, action_ind
         &step.actions
     };
 
-    actions.get(action_index)
+    actions
+        .get(action_index)
         .map(|a| matches!(a, Action::Run { gate: true, .. }))
         .unwrap_or(false)
 }
 
-fn append_checklist(cwd: &PathBuf, stdout: &str) -> Result<()> {
+fn append_checklist(cwd: &Path, stdout: &str) -> Result<()> {
     use chrono::Local;
     let path = cwd.join(".workflow/checklist.md");
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();

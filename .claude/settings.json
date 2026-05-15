@@ -16,6 +16,10 @@
           {
             "type": "command",
             "command": ".claude/hooks/post-edit-validate-config.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/post-edit-rust-checks.sh"
           }
         ]
       },
@@ -25,6 +29,10 @@
           {
             "type": "command",
             "command": ".claude/hooks/post-edit-validate-config.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/post-edit-rust-checks.sh"
           }
         ]
       }

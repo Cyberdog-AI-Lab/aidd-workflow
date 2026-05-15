@@ -4,6 +4,7 @@
 
 test:
 	@echo "Running tests..."
+	cargo test
 	@echo "✓ test_auth_login passed"
 	@echo "✓ test_auth_logout passed"
 	@echo "✓ test_user_profile passed"
@@ -12,8 +13,20 @@ test:
 
 lint:
 	@echo "Linting..."
+	cargo clippy --all-targets --all-features -- -D warnings
 	@echo "✓ No issues found"
 
 build:
 	@echo "Building..."
+	cargo build --release
 	@echo "✓ Build succeeded"
+
+fmt:
+	@echo "Formatting..."
+	cargo fmt --all
+	@echo "✓ Formatting done"
+
+format:
+	@echo "Formatting..."
+	cargo fmt --all -- --check
+	@echo "✓ Format check passed"

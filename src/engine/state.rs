@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use crate::config::types::Workflow;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
-use crate::config::types::Workflow;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -78,11 +78,15 @@ impl WorkflowState {
 
         let all_completed = parallel.iter().all(|sub| {
             let key = format!("{}/{}", parent_id, sub.id);
-            self.steps.get(&key).map(|s| s.status == StepStatus::Completed).unwrap_or(false)
+            self.steps
+                .get(&key)
+                .map(|s| s.status == StepStatus::Completed)
+                .unwrap_or(false)
         });
         let any_started = parallel.iter().any(|sub| {
             let key = format!("{}/{}", parent_id, sub.id);
-            self.steps.get(&key)
+            self.steps
+                .get(&key)
                 .map(|s| s.status != StepStatus::Pending)
                 .unwrap_or(false)
         });
@@ -93,11 +97,9 @@ impl WorkflowState {
             if parent.completed_at.is_none() {
                 parent.completed_at = Some(Utc::now());
             }
-        } else if any_started {
-            if parent.status == StepStatus::Pending {
-                parent.status = StepStatus::InProgress;
-                parent.started_at = Some(Utc::now());
-            }
+        } else if any_started && parent.status == StepStatus::Pending {
+            parent.status = StepStatus::InProgress;
+            parent.started_at = Some(Utc::now());
         }
         Ok(())
     }
@@ -112,20 +114,30 @@ mod tests {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![
-                Step {
-                    id: "parent".to_string(),
-                    name: "Parent".to_string(),
-                    description: None,
-                    actions: vec![],
-                    parallel: Some(vec![
-                        SubStep { id: "a".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
-                        SubStep { id: "b".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
-                    ]),
-                    checklist_key: None,
-                    requires: vec![],
-                },
-            ],
+            steps: vec![Step {
+                id: "parent".to_string(),
+                name: "Parent".to_string(),
+                description: None,
+                actions: vec![],
+                parallel: Some(vec![
+                    SubStep {
+                        id: "a".to_string(),
+                        name: None,
+                        description: None,
+                        actions: vec![],
+                        requires: vec![],
+                    },
+                    SubStep {
+                        id: "b".to_string(),
+                        name: None,
+                        description: None,
+                        actions: vec![],
+                        requires: vec![],
+                    },
+                ]),
+                checklist_key: None,
+                requires: vec![],
+            }],
         }
     }
 
