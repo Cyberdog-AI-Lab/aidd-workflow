@@ -24,7 +24,19 @@ workflow-runner complete test
 
 ## セットアップ
 
-### 1. ビルド
+### 1. インストール（バイナリ配布）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cyberdog/aidd-workflow/main/install.sh | bash
+```
+
+特定バージョンを指定する場合：
+
+```bash
+VERSION=v0.2.0 bash <(curl -fsSL https://raw.githubusercontent.com/cyberdog/aidd-workflow/main/install.sh)
+```
+
+### 2. ビルド（ソースから）
 
 ```bash
 cargo build
@@ -168,7 +180,7 @@ src/                             # workflow-runner（Rust）
 ## 依存
 
 - Rust（`cargo build` でバイナリをビルド）
-- `ANTHROPIC_API_KEY`（standalone アダプターで `agent` アクションを使う場合のみ）
+- `ANTHROPIC_API_KEY`（standalone アダプターで `agent` アクションを使う場合のみ。モデル: `claude-sonnet-4-6`）
 
 ## ドキュメント
 

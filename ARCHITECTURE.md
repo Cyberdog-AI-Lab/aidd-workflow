@@ -158,8 +158,8 @@ next                   次の actions を JSON で返す
 report                 アクション実行結果を記録（stdin: JSON）
 complete <step-id>     ステップ完了（ゲートチェック付き）→ 次の actions を返す
 resume                 中断ワークフローの再開情報を返す
-status                 現在の実行状態を JSON で返す（並列サブステップも含む）
-validate               config.yml を検証する
+status [--format json|table]   現在の実行状態を返す（--format table でターミナルテーブル）
+validate [--format json|text]  config.yml を検証する（--format text で人間可読出力）
 list                   ワークフロー一覧を返す
 hook <event-type>      Claude Code フックイベントを処理（stdin: hook JSON）
 exec-step <step-id>    ステップの run/agent アクションを直接実行（standalone 専用）
@@ -423,7 +423,7 @@ workflow-runner --adapter standalone exec-step <step-id>
 | アクション型 | 実行方法 |
 |-------------|---------|
 | `run` | `std::process::Command` でシェルコマンドを直接実行 |
-| `agent` | Anthropic Messages API（reqwest::blocking）呼び出し。`ANTHROPIC_API_KEY` 環境変数が必要 |
+| `agent` | Anthropic Messages API（reqwest::blocking）呼び出し。`ANTHROPIC_API_KEY` 環境変数が必要。デフォルトモデル: `claude-sonnet-4-6` |
 | `skill` / `workflow` | 未対応（エラーを返す） |
 
 `exec-step` は report と complete を内部で自動実行するため、呼び出し側でのロジックが不要。
@@ -490,7 +490,9 @@ workflow-runner --adapter standalone exec-step <step-id>
 - [x] `reqwest` 0.12 (blocking) 追加
 - [x] 46 ユニットテスト（全パス）
 
-### Phase 4 — 予定
+### Phase 4 — 完了
 
-- [ ] `workflow-runner status --format table` のターミナル表示
-- [ ] バイナリ配布（install スクリプト）
+- [x] `workflow-runner validate --format text` — スキーマエラーを人間可読なメッセージで一括表示（`ValidationError` で複数エラーを収集）
+- [x] `workflow-runner status --format table` — comfy-table による Unicode 対応ターミナルテーブル表示
+- [x] バイナリ配布（`install.sh` + `.github/workflows/release.yml`、4ターゲット）
+- [x] 51 ユニットテスト（全パス）

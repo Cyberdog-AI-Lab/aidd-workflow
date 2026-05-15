@@ -438,9 +438,9 @@ Rust バイナリが判断ロジックを持つため、スキルは「ツール
 
 ### Phase 4：スキーマ・CLI 安定化
 
-- [ ] `workflow-runner validate` でスキーマエラーを人間可読なメッセージで表示
-- [ ] `workflow-runner status --format table` でターミナル表示
-- [ ] バイナリ配布（GitHub Releases + install スクリプト）
+- [x] `workflow-runner validate --format text` でスキーマエラーを人間可読なメッセージで一括表示
+- [x] `workflow-runner status --format table` でターミナルテーブル表示（comfy-table）
+- [x] バイナリ配布（`install.sh` + `.github/workflows/release.yml`、4ターゲット）
 
 ---
 

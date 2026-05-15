@@ -28,7 +28,7 @@ pub fn run_command(command: &str, cwd: &Path) -> Result<RunResult> {
 // --- Anthropic API ---
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
-const DEFAULT_MODEL: &str = "claude-opus-4-7";
+const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 #[derive(Deserialize)]
 struct ContentBlock {

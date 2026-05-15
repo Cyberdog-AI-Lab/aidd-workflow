@@ -11,13 +11,16 @@ use std::path::{Path, PathBuf};
 
 use adapters::claude_code::hook_handler;
 use adapters::standalone::runner as standalone_runner;
-use config::loader::load_config;
+use config::loader::{load_config, validate as validate_config};
 use engine::state::{ActionReport, StepStatus, WorkflowState};
 use engine::store::{clear_state, load_state, save_state};
 use engine::{dag, executor, gate};
 use protocol::{
     input::ReportInput,
-    output::{build_status, CompleteOutput, ErrorOutput, FlowStatus, WorkflowListItem},
+    output::{
+        build_status, format_status_table, format_validate_text, CompleteOutput, ErrorOutput,
+        FlowStatus, ValidateOutput, WorkflowListItem,
+    },
 };
 
 #[derive(Parser)]
@@ -51,9 +54,17 @@ enum Commands {
     /// Return resume information for an interrupted workflow.
     Resume,
     /// Return the current execution state as JSON.
-    Status,
+    Status {
+        /// Output format: json (default) or table
+        #[arg(long, default_value = "json", value_parser = ["json", "table"])]
+        format: String,
+    },
     /// Validate config.yml.
-    Validate,
+    Validate {
+        /// Output format: json (default) or text
+        #[arg(long, default_value = "json", value_parser = ["json", "text"])]
+        format: String,
+    },
     /// List available workflows.
     List,
     /// Process a Claude Code hook event (stdin: hook JSON).
@@ -94,8 +105,8 @@ fn run(cmd: Commands, cwd: &Path, adapter: &str) -> Result<String> {
         Commands::Report => cmd_report(cwd),
         Commands::Complete { step_id } => cmd_complete(cwd, &step_id),
         Commands::Resume => cmd_resume(cwd),
-        Commands::Status => cmd_status(cwd),
-        Commands::Validate => cmd_validate(cwd),
+        Commands::Status { format } => cmd_status(cwd, &format),
+        Commands::Validate { format } => cmd_validate(cwd, &format),
         Commands::List => cmd_list(cwd),
         Commands::Hook { event_type } => cmd_hook(cwd, &event_type, adapter),
         Commands::ExecStep { step_id } => cmd_exec_step(cwd, &step_id),
@@ -241,7 +252,7 @@ fn cmd_resume(cwd: &Path) -> Result<String> {
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn cmd_status(cwd: &Path) -> Result<String> {
+fn cmd_status(cwd: &Path, format: &str) -> Result<String> {
     let config = load_config(cwd)?;
     let state = load_state(cwd)?.context("no workflow in progress")?;
     let wf = config
@@ -249,24 +260,73 @@ fn cmd_status(cwd: &Path) -> Result<String> {
         .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
-    Ok(serde_json::to_string_pretty(&build_status(&state, wf))?)
+    let status = build_status(&state, wf);
+    if format == "table" {
+        Ok(format_status_table(&status))
+    } else {
+        Ok(serde_json::to_string_pretty(&status)?)
+    }
 }
 
-fn cmd_validate(cwd: &Path) -> Result<String> {
-    match load_config(cwd) {
-        Ok(config) => {
-            let wf_count = config.workflows.len();
-            let ok = serde_json::json!({
-                "valid": true,
-                "workflows": wf_count,
-                "commands": config.commands.keys().collect::<Vec<_>>()
-            });
-            Ok(ok.to_string())
+fn cmd_validate(cwd: &Path, format: &str) -> Result<String> {
+    let path = cwd.join(".workflow/config.yml");
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => {
+            let out = ValidateOutput {
+                valid: false,
+                workflow_count: 0,
+                commands: vec![],
+                errors: vec![format!(
+                    ".workflow/config.yml not found: {}",
+                    path.display()
+                )],
+            };
+            return Ok(render_validate(&out, format));
         }
+    };
+
+    let config: crate::config::types::Config = match serde_yaml::from_str(&content) {
+        Ok(c) => c,
         Err(e) => {
-            let err = serde_json::json!({ "valid": false, "error": e.to_string() });
-            Ok(err.to_string())
+            let out = ValidateOutput {
+                valid: false,
+                workflow_count: 0,
+                commands: vec![],
+                errors: vec![format!("YAML parse error: {}", e)],
+            };
+            return Ok(render_validate(&out, format));
         }
+    };
+
+    let out = match validate_config(&config) {
+        Err(ve) => ValidateOutput {
+            valid: false,
+            workflow_count: config.workflows.len(),
+            commands: config.commands.keys().cloned().collect(),
+            errors: ve.errors,
+        },
+        Ok(()) => {
+            let mut commands: Vec<String> = config.commands.keys().cloned().collect();
+            commands.sort();
+            ValidateOutput {
+                valid: true,
+                workflow_count: config.workflows.len(),
+                commands,
+                errors: vec![],
+            }
+        }
+    };
+
+    Ok(render_validate(&out, format))
+}
+
+fn render_validate(out: &ValidateOutput, format: &str) -> String {
+    if format == "text" {
+        format_validate_text(out)
+    } else {
+        serde_json::to_string_pretty(out).unwrap()
     }
 }
 
