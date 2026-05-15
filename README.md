@@ -42,7 +42,7 @@ VERSION=v0.2.0 bash <(curl -fsSL https://raw.githubusercontent.com/cyberdog/aidd
 cargo build
 ```
 
-### 2. config.yml を編集
+### 3. config.yml を編集
 
 `.workflow/config.yml` でプロジェクトのコマンドを設定する：
 
@@ -66,12 +66,14 @@ commands:
 ### CLI から直接操作
 
 ```bash
-./target/debug/workflow-runner list                  # ワークフロー一覧
-./target/debug/workflow-runner start bug-fix         # 開始
-./target/debug/workflow-runner next                  # 次のアクション確認
-./target/debug/workflow-runner complete <step-id>    # ステップ完了（ゲートチェック付き）
-./target/debug/workflow-runner status                # 現在の状態
-./target/debug/workflow-runner validate              # config.yml 検証
+./target/debug/workflow-runner list                           # ワークフロー一覧
+./target/debug/workflow-runner start bug-fix                  # 開始
+./target/debug/workflow-runner next                           # 次のアクション確認
+./target/debug/workflow-runner complete <step-id>             # ステップ完了（ゲートチェック付き）
+./target/debug/workflow-runner status                         # 現在の状態（JSON）
+./target/debug/workflow-runner status --format table          # 現在の状態（ターミナルテーブル）
+./target/debug/workflow-runner validate                       # config.yml 検証（JSON）
+./target/debug/workflow-runner validate --format text         # config.yml 検証（人間可読）
 ```
 
 ### standalone アダプターで自律実行（AI ツール不要）
@@ -152,14 +154,19 @@ workflows:
 ## ファイル構成
 
 ```
+install.sh                       バイナリインストールスクリプト（macOS/Linux）
+
 src/                             # workflow-runner（Rust）
 ├── main.rs                      CLI エントリポイント
-├── config/                      YAML パース・型定義
+├── config/                      YAML パース・型定義・ValidationError
 ├── engine/                      DAG 評価・状態管理・ゲートチェック
 ├── adapters/
 │   ├── claude_code/             Claude Code フック処理
 │   └── standalone/              run_command / call_anthropic_api
-└── protocol/                    JSON 入出力型
+└── protocol/                    JSON 入出力型・テーブルフォーマッター
+
+.github/workflows/
+└── release.yml                  GitHub Actions リリースパイプライン（4ターゲット）
 
 .workflow/
 ├── config.yml                   ワークフロー定義（編集する）

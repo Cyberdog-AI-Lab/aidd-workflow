@@ -53,11 +53,12 @@
 
 ```
 aidd-workflow/
+├── install.sh                           バイナリインストールスクリプト（macOS/Linux）
 ├── src/
 │   ├── main.rs                          CLI エントリポイント（clap）
 │   ├── config/
 │   │   ├── types.rs                     Config / Workflow / Step / SubStep / Action 型定義（Pure）
-│   │   └── loader.rs                    YAML ロード + バリデーション（Shell）
+│   │   └── loader.rs                    YAML ロード + バリデーション / ValidationError（Shell）
 │   ├── engine/
 │   │   ├── state.rs                     WorkflowState 型定義・純粋メソッド（Pure）
 │   │   ├── store.rs                     state.json 読み書き（Shell）
@@ -71,7 +72,10 @@ aidd-workflow/
 │   │       └── runner.rs                run_command / call_anthropic_api（Shell）
 │   └── protocol/
 │       ├── input.rs                     report コマンドの stdin 型（Pure）
-│       └── output.rs                    JSON 出力型定義（Pure）
+│       └── output.rs                    JSON 出力型・テーブルフォーマッター（Pure）
+├── .github/
+│   └── workflows/
+│       └── release.yml                  GitHub Actions リリースパイプライン（4ターゲット）
 ├── .workflow/
 │   ├── config.yml                       ワークフロー定義（ユーザーが編集）
 │   ├── workflow.schema.json             JSON Schema（拡張済み）
@@ -268,6 +272,55 @@ SKILL.md（Claude Code）                workflow-runner
 }
 ```
 
+**validate の出力（JSON デフォルト）**
+
+```json
+{
+  "valid": true,
+  "workflow_count": 3,
+  "commands": ["build", "lint", "test"],
+  "errors": []
+}
+```
+
+エラー時は `errors` 配列に全問題を一括収集する（最初の1件で停止しない）:
+
+```json
+{
+  "valid": false,
+  "workflow_count": 1,
+  "commands": ["lint"],
+  "errors": [
+    "commands.test is not defined in config.yml",
+    "step 'deploy' in workflow 'release': unknown requires 'build'"
+  ]
+}
+```
+
+**validate --format text の出力**（人間可読）
+
+```
+config.yml has 2 error(s):
+  [1] commands.test is not defined in config.yml
+  [2] step 'deploy' in workflow 'release': unknown requires 'build'
+```
+
+**status --format table の出力**
+
+```
+Session : 4fd261ba-...
+Workflow: bug-fix
+Started : 2026-05-15T10:00:00+00:00
+
+┌──────────────────────────────────┐
+│ STEP ID     NAME         STATUS  │
+╞══════════════════════════════════╡
+│ reproduce   再現確認     completed │
+│ identify    原因特定     in_progress │
+│ implement   修正実装     pending  │
+└──────────────────────────────────┘
+```
+
 ---
 
 ## 状態管理（state.json）
@@ -450,6 +503,7 @@ workflow-runner --adapter standalone exec-step <step-id>
 | `uuid` | 1 | セッション ID 生成（v4） |
 | `chrono` | 0.4 | タイムスタンプ（UTC/ローカル） |
 | `reqwest` | 0.12 | Anthropic API HTTP クライアント（blocking feature） |
+| `comfy-table` | 7 | `status --format table` のターミナルテーブル描画（Pure、Unicode 対応） |
 | `tempfile` | 3 | テスト用一時ディレクトリ（dev-dependency） |
 
 ---
