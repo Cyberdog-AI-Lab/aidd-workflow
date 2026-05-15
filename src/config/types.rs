@@ -37,6 +37,9 @@ pub struct SubStep {
     pub description: Option<String>,
     #[serde(default)]
     pub actions: Vec<Action>,
+    /// Dependencies on other sub-steps within the same parallel block.
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -101,5 +104,20 @@ name: Step 1"#;
         assert!(step.requires.is_empty());
         assert!(step.actions.is_empty());
         assert!(step.parallel.is_none());
+    }
+
+    #[test]
+    fn sub_step_requires_defaults_to_empty() {
+        let yaml = r#"id: sub1"#;
+        let sub: SubStep = serde_yaml::from_str(yaml).unwrap();
+        assert!(sub.requires.is_empty());
+    }
+
+    #[test]
+    fn sub_step_requires_parses_list() {
+        let yaml = r#"id: sub2
+requires: [sub1]"#;
+        let sub: SubStep = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(sub.requires, vec!["sub1"]);
     }
 }

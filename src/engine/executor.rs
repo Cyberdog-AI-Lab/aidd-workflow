@@ -29,6 +29,7 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
                         step_id: item_id.clone(),
                         action_index: 0,
                         step_name: step_name.to_string(),
+                        parallel: true,
                         action: ResolvedAction::Manual {
                             description: sub.description.clone().unwrap_or_default(),
                             checklist_key: None,
@@ -40,6 +41,7 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
                             step_id: item_id.clone(),
                             action_index: i,
                             step_name: step_name.to_string(),
+                            parallel: true,
                             action: resolve(action, config),
                         });
                     }
@@ -52,6 +54,7 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
                     step_id: item_id.clone(),
                     action_index: 0,
                     step_name: step.name.clone(),
+                    parallel: false,
                     action: ResolvedAction::Manual {
                         description: step.description.clone().unwrap_or_default(),
                         checklist_key: step.checklist_key.clone(),
@@ -63,6 +66,7 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
                         step_id: item_id.clone(),
                         action_index: i,
                         step_name: step.name.clone(),
+                        parallel: false,
                         action: resolve(action, config),
                     });
                 }
@@ -197,6 +201,44 @@ mod tests {
             }
             _ => panic!("expected Manual"),
         }
+    }
+
+    #[test]
+    fn parallel_sub_step_actions_have_parallel_true() {
+        use crate::config::types::{SubStep};
+        let wf = Workflow {
+            name: "test".to_string(),
+            description: None,
+            steps: vec![Step {
+                id: "p".to_string(),
+                name: "Parallel".to_string(),
+                description: None,
+                actions: vec![],
+                parallel: Some(vec![
+                    SubStep { id: "x".to_string(), name: None, description: None, actions: vec![Action::Run { command: "cmd".to_string(), gate: false }], requires: vec![] },
+                    SubStep { id: "y".to_string(), name: None, description: None, actions: vec![Action::Run { command: "cmd2".to_string(), gate: false }], requires: vec![] },
+                ]),
+                checklist_key: None,
+                requires: vec![],
+            }],
+        };
+        let config = config_with_test_cmd("make test");
+        let state = WorkflowState::new("test", &wf);
+
+        let output = build_next(&wf, &state, &config);
+        assert_eq!(output.actions.len(), 2);
+        assert!(output.actions[0].parallel);
+        assert!(output.actions[1].parallel);
+    }
+
+    #[test]
+    fn sequential_step_action_has_parallel_false() {
+        let wf = workflow_with_run_action();
+        let config = config_with_test_cmd("make test");
+        let state = WorkflowState::new("test", &wf);
+
+        let output = build_next(&wf, &state, &config);
+        assert!(!output.actions[0].parallel);
     }
 
     #[test]

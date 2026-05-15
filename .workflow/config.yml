@@ -60,3 +60,38 @@ workflows:
         name: 完了判定
         description: 実装・テストが完了したことを確認する
         requires: [design, test]
+
+  release:
+    name: リリースフロー
+    description: 設計・実装・品質チェック（並列）まで完走するフロー
+    steps:
+      - id: design
+        name: 設計確認
+        description: 実装方針・影響範囲・インターフェースを整理して記録する
+        checklist_key: design
+
+      - id: implement
+        name: 実装
+        description: 設計に従って実装する
+        requires: [design]
+
+      - id: quality-check
+        name: 品質チェック（並列）
+        requires: [implement]
+        parallel:
+          - id: run-test
+            name: テスト実行
+            actions:
+              - type: run
+                command: "{{commands.test}}"
+                gate: true
+          - id: run-lint
+            name: Lint
+            actions:
+              - type: run
+                command: "{{commands.lint}}"
+
+      - id: complete
+        name: 完了判定
+        description: 設計・実装・品質チェックが完了したことを確認する
+        requires: [quality-check]

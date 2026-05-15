@@ -119,8 +119,8 @@ mod tests {
                     description: None,
                     actions: vec![],
                     parallel: Some(vec![
-                        SubStep { id: "a".to_string(), name: None, description: None, actions: vec![] },
-                        SubStep { id: "b".to_string(), name: None, description: None, actions: vec![] },
+                        SubStep { id: "a".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
+                        SubStep { id: "b".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
                     ]),
                     checklist_key: None,
                     requires: vec![],

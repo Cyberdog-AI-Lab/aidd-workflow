@@ -27,6 +27,9 @@ pub struct ActionItem {
     pub action_index: usize,
     /// Display name of the step.
     pub step_name: String,
+    /// When true, this item is part of a parallel block and may run concurrently
+    /// with other parallel=true items in the same response.
+    pub parallel: bool,
     #[serde(flatten)]
     pub action: ResolvedAction,
 }
@@ -95,12 +98,23 @@ pub struct ErrorOutput {
 }
 
 pub fn build_status(state: &WorkflowState, wf: &Workflow) -> StatusOutput {
-    let steps = wf.steps.iter().map(|step| {
+    let mut steps = Vec::new();
+    for step in &wf.steps {
         let status = state.steps.get(&step.id)
             .map(|s| format!("{:?}", s.status).to_lowercase())
             .unwrap_or_else(|| "pending".to_string());
-        StepStatusItem { id: step.id.clone(), name: step.name.clone(), status }
-    }).collect();
+        steps.push(StepStatusItem { id: step.id.clone(), name: step.name.clone(), status });
+        if let Some(parallel) = &step.parallel {
+            for sub in parallel {
+                let key = format!("{}/{}", step.id, sub.id);
+                let sub_status = state.steps.get(&key)
+                    .map(|s| format!("{:?}", s.status).to_lowercase())
+                    .unwrap_or_else(|| "pending".to_string());
+                let sub_name = sub.name.as_deref().unwrap_or(&sub.id).to_string();
+                steps.push(StepStatusItem { id: key, name: sub_name, status: sub_status });
+            }
+        }
+    }
 
     StatusOutput {
         session_id: state.session_id.clone(),
@@ -149,5 +163,34 @@ mod tests {
 
         let out = build_status(&state, &wf);
         assert_eq!(out.steps[0].status, "pending");
+    }
+
+    #[test]
+    fn build_status_includes_parallel_sub_steps() {
+        use crate::config::types::{SubStep};
+        let wf = Workflow {
+            name: "test".to_string(),
+            description: None,
+            steps: vec![Step {
+                id: "p".to_string(),
+                name: "Parallel".to_string(),
+                description: None,
+                actions: vec![],
+                parallel: Some(vec![
+                    SubStep { id: "a".to_string(), name: Some("A".to_string()), description: None, actions: vec![], requires: vec![] },
+                    SubStep { id: "b".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
+                ]),
+                checklist_key: None,
+                requires: vec![],
+            }],
+        };
+        let state = WorkflowState::new("test", &wf);
+        let out = build_status(&state, &wf);
+        // parent + 2 sub-steps
+        assert_eq!(out.steps.len(), 3);
+        assert_eq!(out.steps[1].id, "p/a");
+        assert_eq!(out.steps[1].name, "A");
+        assert_eq!(out.steps[2].id, "p/b");
+        assert_eq!(out.steps[2].name, "b");
     }
 }

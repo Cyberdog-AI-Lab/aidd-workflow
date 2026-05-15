@@ -114,6 +114,7 @@ mod tests {
             name: None,
             description: None,
             actions: vec![],
+            requires: vec![],
         }]);
         assert!(validate(&config).is_err());
     }

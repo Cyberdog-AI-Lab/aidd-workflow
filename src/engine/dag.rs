@@ -24,7 +24,16 @@ pub fn executable_items(wf: &Workflow, state: &WorkflowState) -> Vec<String> {
                 let sub_status = state.steps.get(&key)
                     .map(|s| &s.status)
                     .unwrap_or(&StepStatus::Pending);
-                if matches!(sub_status, StepStatus::Pending | StepStatus::InProgress) {
+                if !matches!(sub_status, StepStatus::Pending | StepStatus::InProgress) {
+                    continue;
+                }
+                let sub_requires_met = sub.requires.iter().all(|req| {
+                    let req_key = format!("{}/{}", step.id, req);
+                    state.steps.get(&req_key)
+                        .map(|s| s.status == StepStatus::Completed)
+                        .unwrap_or(false)
+                });
+                if sub_requires_met {
                     items.push(key);
                 }
             }
@@ -104,8 +113,8 @@ mod tests {
                     description: None,
                     actions: vec![],
                     parallel: Some(vec![
-                        SubStep { id: "x".to_string(), name: None, description: None, actions: vec![] },
-                        SubStep { id: "y".to_string(), name: None, description: None, actions: vec![] },
+                        SubStep { id: "x".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
+                        SubStep { id: "y".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
                     ]),
                     checklist_key: None,
                     requires: vec![],
@@ -168,5 +177,45 @@ mod tests {
     #[test]
     fn parent_of_returns_none_for_normal_step() {
         assert_eq!(parent_of("step1"), None);
+    }
+
+    fn make_parallel_workflow_with_sub_requires() -> Workflow {
+        Workflow {
+            name: "test".to_string(),
+            description: None,
+            steps: vec![
+                Step {
+                    id: "p".to_string(),
+                    name: "Parallel".to_string(),
+                    description: None,
+                    actions: vec![],
+                    parallel: Some(vec![
+                        SubStep { id: "x".to_string(), name: None, description: None, actions: vec![], requires: vec![] },
+                        SubStep { id: "y".to_string(), name: None, description: None, actions: vec![], requires: vec!["x".to_string()] },
+                    ]),
+                    checklist_key: None,
+                    requires: vec![],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn sub_step_with_unmet_requires_not_executable() {
+        let wf = make_parallel_workflow_with_sub_requires();
+        let state = WorkflowState::new("test", &wf);
+        let items = executable_items(&wf, &state);
+        // Only x is executable; y requires x which is not complete
+        assert_eq!(items, vec!["p/x"]);
+        assert!(!items.contains(&"p/y".to_string()));
+    }
+
+    #[test]
+    fn sub_step_becomes_executable_after_requires_complete() {
+        let wf = make_parallel_workflow_with_sub_requires();
+        let mut state = WorkflowState::new("test", &wf);
+        state.steps.get_mut("p/x").unwrap().status = StepStatus::Completed;
+        let items = executable_items(&wf, &state);
+        assert_eq!(items, vec!["p/y"]);
     }
 }

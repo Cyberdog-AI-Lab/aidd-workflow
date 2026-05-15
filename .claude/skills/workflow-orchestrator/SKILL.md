@@ -104,7 +104,34 @@ echo '{"session_id":"<id>","step_id":"<step>","action_index":<n>,"action_type":"
 
 ## 並列アクションの実行
 
-同一ステップに複数の `ActionItem` が含まれ、かつ `background: true` のものがある場合：
+### 並列ブロック（`parallel: true`）
+
+`actions` 配列に `"parallel": true` の `ActionItem` が含まれる場合、それらは並列ブロックのサブステップを表す。`step_id` は `"parent/sub"` 形式になる。
+
+```
+actions: [
+  { "step_id": "quality-check/run-test", "parallel": true, "type": "run",   "command": "make test", "gate": true },
+  { "step_id": "quality-check/run-lint", "parallel": true, "type": "run",   "command": "make lint" },
+  { "step_id": "quality-check/security", "parallel": true, "type": "skill", "skill": "security-review" }
+]
+```
+
+実行方針：
+- `type: run` の並列アクション → 順番に Bash で実行する（Bash は非同期不可）
+- `type: agent` / `type: skill` で `background: true` → Agent ツールで並列起動する
+- `type: agent` / `type: skill` で `background: false` → 順番に実行する
+
+各アクション完了後、`report` を呼んで結果を記録する。`step_id` はサブステップ ID（`parent/sub`）を使う。
+
+全サブステップが完了したら、**親ステップの ID**（`/` を含まない部分）で `complete` を呼ぶ：
+
+```bash
+./target/debug/workflow-runner complete quality-check
+```
+
+### エージェントアクション内の background（`parallel: false`）
+
+同一ステップの `actions` 配列に複数の `ActionItem` が含まれ、`type: agent` かつ `background: true` のものがある場合：
 - `background: true` の `agent` / `skill` は Agent ツールで並列起動する
 - `run` アクションは直列実行（Bash は非同期対応していないため）
 
