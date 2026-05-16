@@ -33,7 +33,7 @@ pub fn load_config(cwd: &Path) -> Result<Config> {
 }
 
 fn load_config_recursive(
-    path: &std::path::PathBuf,
+    path: &Path,
     base: &Path,
     visited: &mut HashSet<std::path::PathBuf>,
 ) -> Result<Config> {
