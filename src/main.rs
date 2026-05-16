@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use adapters::claude_code::hook_handler;
+use adapters::hooks::hook_handler;
 use adapters::standalone::channels as standalone_channels;
 use adapters::standalone::runner as standalone_runner;
 use config::loader::{load_config, validate as validate_config};

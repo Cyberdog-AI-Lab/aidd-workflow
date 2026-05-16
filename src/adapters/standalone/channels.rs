@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::providers::channels;
+use crate::providers::claude_code::channels;
 
 pub struct AgentResult {
     pub stdout: String,

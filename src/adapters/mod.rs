@@ -1,2 +1,2 @@
-pub mod claude_code;
+pub mod hooks;
 pub mod standalone;
