@@ -429,7 +429,7 @@ design ──▶ implement ──▶ quality-check ──▶ complete
 |----|------|--------|
 | `providers/claude_code/` | Claude Code 固有の hook JSON を型安全な構造体にパース | `PostBashEvent`, `PreEditEvent` |
 | `adapters/claude_code/` | パース済みイベントを受け取り、engine 層を呼んで `HookResponse` を返す | `handle_pre_edit()` |
-| `adapters/standalone/` | シェルコマンド実行・Channels API 呼び出し | `run_command()`, `channels.rs` |
+| `adapters/standalone/` | シェルコマンド実行・Channels API 呼び出し | `run_command()`, `run_agent()` |
 
 `adapters/` は `providers/` を使うが、具体的な JSON 形式を知らない。
 `providers/` は `engine/` や `config/` を知らない（純粋な変換のみ）。
@@ -471,8 +471,7 @@ workflow-runner --adapter standalone exec-step <step-id>
 
 | アクション型 | 実行方法 |
 |-------------|---------|
-| `run` 相当 | `std::process::Command` でシェルコマンドを直接実行 |
-| `agent` | Claude Code Channels API 経由でエージェントを呼び出す |
+| `agent` | `providers::channels`（`claude -p`）経由で Claude Code Channels API を呼び出す |
 
 ---
 
@@ -491,4 +490,4 @@ workflow-runner --adapter standalone exec-step <step-id>
 | `comfy-table` | 7 | `status --format table` のターミナルテーブル描画 |
 | `tempfile` | 3 | テスト用一時ディレクトリ（dev-dependency） |
 
-> **廃止予定**: `reqwest`（Anthropic API 直接呼び出しが Claude Code Channels に移行後）
+> **廃止済み**: `reqwest`（Anthropic API 直接呼び出しを Claude Code Channels（`claude -p`）に移行）

@@ -12,6 +12,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use adapters::claude_code::hook_handler;
+use adapters::standalone::channels as standalone_channels;
 use adapters::standalone::runner as standalone_runner;
 use config::loader::{load_config, validate as validate_config};
 use engine::state::{ActionReport, StepStatus, WorkflowState};
@@ -465,9 +466,9 @@ fn cmd_exec_step(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result
     for (idx, action) in step.actions.iter().enumerate() {
         let (exit_code, stdout, _stderr) = match action {
             Action::Agent { prompt, .. } => {
-                let text = standalone_runner::call_anthropic_api(prompt)?;
-                println!("{}", text);
-                (0, text, String::new())
+                let result = standalone_channels::run_agent(prompt, cwd)?;
+                println!("{}", result.stdout);
+                (0, result.stdout, String::new())
             }
             Action::Skill { skill, .. } => {
                 anyhow::bail!(

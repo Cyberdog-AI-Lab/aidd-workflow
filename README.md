@@ -88,12 +88,11 @@ commands:
 
 ### standalone アダプターで自律実行（AI ツール不要）
 
-`exec-step` を使うと `run` / `agent` アクションを workflow-runner が直接実行する。
+`exec-step` を使うと `agent` アクションを workflow-runner が直接実行する。
+`agent` アクションは Claude Code Channels（`claude -p`）経由で実行されるため、
+`ANTHROPIC_API_KEY` は不要。`claude` CLI が認証済みであること。
 
 ```bash
-# ANTHROPIC_API_KEY が必要（agent アクションを使う場合）
-export ANTHROPIC_API_KEY=sk-ant-...
-
 ./target/debug/workflow-runner --adapter standalone start feature
 ./target/debug/workflow-runner --adapter standalone exec-step implement
 ./target/debug/workflow-runner --adapter standalone exec-step test
@@ -208,7 +207,7 @@ src/                             # workflow-runner（Rust）
 ## 依存
 
 - Rust（`cargo build` でバイナリをビルド）
-- `ANTHROPIC_API_KEY`（v4 の standalone アダプターで `agent` アクションを使う場合のみ。v5 以降は Claude Code Channels に移行）
+- `claude` CLI（standalone アダプターで `agent` アクションを使う場合）：Claude Code Channels 経由で実行するため認証済みであること
 
 ## ドキュメント
 
