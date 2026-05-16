@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
 pub struct WorkflowOutput {
-    pub session_id: String,
+    pub workflow_id: String,
     pub workflow: String,
     pub status: FlowStatus,
     /// Actions to execute next; may contain multiple items for concurrent execution.
@@ -71,7 +71,7 @@ pub struct CompleteOutput {
 
 #[derive(Debug, Serialize)]
 pub struct StatusOutput {
-    pub session_id: String,
+    pub workflow_id: String,
     pub workflow: String,
     pub started_at: String,
     pub steps: Vec<StepStatusItem>,
@@ -144,7 +144,7 @@ pub fn format_status_table(output: &StatusOutput) -> String {
 
     format!(
         "Session : {}\nWorkflow: {}\nStarted : {}\n\n{}",
-        output.session_id, output.workflow, output.started_at, table
+        output.workflow_id, output.workflow, output.started_at, table
     )
 }
 
@@ -180,7 +180,7 @@ pub fn build_status(state: &WorkflowState, wf: &Workflow) -> StatusOutput {
     }
 
     StatusOutput {
-        session_id: state.session_id.clone(),
+        workflow_id: state.workflow_id.clone(),
         workflow: state.workflow.clone(),
         started_at: state.started_at.to_rfc3339(),
         steps,

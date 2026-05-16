@@ -2,8 +2,7 @@
 /target/
 
 # workflow-runner 実行時の一時ファイル
-.workflow/state.json
-.workflow/checklist.md
+.workflow/workflow.db
 .workflow/GATE_ACTIVE
 
 # Claude Code ローカル設定

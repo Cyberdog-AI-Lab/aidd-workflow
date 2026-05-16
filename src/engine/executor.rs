@@ -6,7 +6,7 @@ use crate::protocol::output::{ActionItem, FlowStatus, ResolvedAction, WorkflowOu
 pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> WorkflowOutput {
     if dag::is_workflow_complete(wf, state) {
         return WorkflowOutput {
-            session_id: state.session_id.clone(),
+            workflow_id: state.workflow_id.clone(),
             workflow: state.workflow.clone(),
             status: FlowStatus::Completed,
             actions: vec![],
@@ -75,7 +75,7 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
     }
 
     WorkflowOutput {
-        session_id: state.session_id.clone(),
+        workflow_id: state.workflow_id.clone(),
         workflow: state.workflow.clone(),
         status: if actions.is_empty() {
             FlowStatus::Blocked

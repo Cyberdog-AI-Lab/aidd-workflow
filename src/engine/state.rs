@@ -39,7 +39,7 @@ pub struct ActionReport {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkflowState {
-    pub session_id: String,
+    pub workflow_id: String,
     pub workflow: String,
     pub started_at: DateTime<Utc>,
     /// Keys: step_id for normal steps; "parent_id/sub_id" for parallel sub-steps.
@@ -58,7 +58,7 @@ impl WorkflowState {
             }
         }
         WorkflowState {
-            session_id: Uuid::new_v4().to_string(),
+            workflow_id: Uuid::new_v4().to_string(),
             workflow: workflow_name.to_string(),
             started_at: Utc::now(),
             steps,
@@ -145,6 +145,7 @@ mod tests {
     fn new_initializes_all_step_keys() {
         let wf = make_workflow_with_parallel();
         let state = WorkflowState::new("test", &wf);
+        assert!(!state.workflow_id.is_empty());
         assert!(state.steps.contains_key("parent"));
         assert!(state.steps.contains_key("parent/a"));
         assert!(state.steps.contains_key("parent/b"));

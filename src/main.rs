@@ -2,6 +2,7 @@ mod adapters;
 mod config;
 mod engine;
 mod protocol;
+mod providers;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -13,7 +14,7 @@ use adapters::claude_code::hook_handler;
 use adapters::standalone::runner as standalone_runner;
 use config::loader::{load_config, validate as validate_config};
 use engine::state::{ActionReport, StepStatus, WorkflowState};
-use engine::store::{clear_state, load_state, save_state};
+use engine::store::{clear_state_by_id, load_state, load_state_by_id, save_state};
 use engine::{dag, executor, gate};
 use protocol::{
     input::ReportInput,
@@ -36,6 +37,10 @@ struct Cli {
     /// Project root directory (defaults to current directory)
     #[arg(long)]
     cwd: Option<PathBuf>,
+
+    /// Workflow ID to target (required when multiple active workflows exist)
+    #[arg(long)]
+    workflow_id: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -80,7 +85,7 @@ fn main() {
     let cli = Cli::parse();
     let cwd = cli.cwd.unwrap_or_else(|| std::env::current_dir().unwrap());
 
-    let result = run(cli.command, &cwd, &cli.adapter);
+    let result = run(cli.command, &cwd, &cli.adapter, cli.workflow_id.as_deref());
     match result {
         Ok(json) => {
             if !json.is_empty() {
@@ -98,18 +103,25 @@ fn main() {
     }
 }
 
-fn run(cmd: Commands, cwd: &Path, adapter: &str) -> Result<String> {
+fn run(cmd: Commands, cwd: &Path, adapter: &str, workflow_id: Option<&str>) -> Result<String> {
     match cmd {
         Commands::Start { workflow } => cmd_start(cwd, &workflow),
-        Commands::Next => cmd_next(cwd),
-        Commands::Report => cmd_report(cwd),
-        Commands::Complete { step_id } => cmd_complete(cwd, &step_id),
-        Commands::Resume => cmd_resume(cwd),
-        Commands::Status { format } => cmd_status(cwd, &format),
+        Commands::Next => cmd_next(cwd, workflow_id),
+        Commands::Report => cmd_report(cwd, workflow_id),
+        Commands::Complete { step_id } => cmd_complete(cwd, &step_id, workflow_id),
+        Commands::Resume => cmd_resume(cwd, workflow_id),
+        Commands::Status { format } => cmd_status(cwd, &format, workflow_id),
         Commands::Validate { format } => cmd_validate(cwd, &format),
         Commands::List => cmd_list(cwd),
         Commands::Hook { event_type } => cmd_hook(cwd, &event_type, adapter),
-        Commands::ExecStep { step_id } => cmd_exec_step(cwd, &step_id),
+        Commands::ExecStep { step_id } => cmd_exec_step(cwd, &step_id, workflow_id),
+    }
+}
+
+fn resolve_state(cwd: &Path, workflow_id: Option<&str>) -> Result<Option<WorkflowState>> {
+    match workflow_id {
+        Some(id) => load_state_by_id(cwd, id),
+        None => load_state(cwd),
     }
 }
 
@@ -130,9 +142,9 @@ fn cmd_start(cwd: &Path, workflow_name: &str) -> Result<String> {
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn cmd_next(cwd: &Path) -> Result<String> {
+fn cmd_next(cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
     let config = load_config(cwd)?;
-    let state = load_state(cwd)?
+    let state = resolve_state(cwd, workflow_id)?
         .context("no workflow in progress; run `workflow-runner start <workflow>` first")?;
     let wf = config
         .workflows
@@ -143,13 +155,13 @@ fn cmd_next(cwd: &Path) -> Result<String> {
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn cmd_report(cwd: &Path) -> Result<String> {
+fn cmd_report(cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
     let input_str = read_stdin()?;
     let input: ReportInput =
         serde_json::from_str(&input_str).context("report stdin is not valid JSON")?;
 
     let config = load_config(cwd)?;
-    let mut state = load_state(cwd)?.context("no workflow in progress")?;
+    let mut state = resolve_state(cwd, workflow_id)?.context("no workflow in progress")?;
 
     let wf = config
         .workflows
@@ -185,19 +197,13 @@ fn cmd_report(cwd: &Path) -> Result<String> {
 
     save_state(cwd, &state)?;
 
-    if is_gate {
-        if let Some(stdout) = &input.stdout {
-            append_checklist(cwd, stdout)?;
-        }
-    }
-
     let out = serde_json::json!({ "ok": true, "step_id": input.step_id });
     Ok(out.to_string())
 }
 
-fn cmd_complete(cwd: &Path, step_id: &str) -> Result<String> {
+fn cmd_complete(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result<String> {
     let config = load_config(cwd)?;
-    let mut state = load_state(cwd)?.context("no workflow in progress")?;
+    let mut state = resolve_state(cwd, workflow_id)?.context("no workflow in progress")?;
     let wf = config
         .workflows
         .get(&state.workflow)
@@ -228,7 +234,7 @@ fn cmd_complete(cwd: &Path, step_id: &str) -> Result<String> {
 
     let next = executor::build_next(wf, &state, &config);
     if matches!(next.status, FlowStatus::Completed) {
-        clear_state(cwd)?;
+        clear_state_by_id(cwd, &state.workflow_id)?;
     }
 
     let output = CompleteOutput {
@@ -240,9 +246,9 @@ fn cmd_complete(cwd: &Path, step_id: &str) -> Result<String> {
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn cmd_resume(cwd: &Path) -> Result<String> {
+fn cmd_resume(cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
     let config = load_config(cwd)?;
-    let state = load_state(cwd)?.context("no workflow in progress")?;
+    let state = resolve_state(cwd, workflow_id)?.context("no workflow in progress")?;
     let wf = config
         .workflows
         .get(&state.workflow)
@@ -252,9 +258,9 @@ fn cmd_resume(cwd: &Path) -> Result<String> {
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn cmd_status(cwd: &Path, format: &str) -> Result<String> {
+fn cmd_status(cwd: &Path, format: &str, workflow_id: Option<&str>) -> Result<String> {
     let config = load_config(cwd)?;
-    let state = load_state(cwd)?.context("no workflow in progress")?;
+    let state = resolve_state(cwd, workflow_id)?.context("no workflow in progress")?;
     let wf = config
         .workflows
         .get(&state.workflow)
@@ -348,19 +354,31 @@ fn cmd_list(cwd: &Path) -> Result<String> {
 
 fn cmd_hook(cwd: &Path, event_type: &str, _adapter: &str) -> Result<String> {
     let input = read_stdin().unwrap_or_default();
+    let effective_cwd = extract_cwd_from_stdin(&input, cwd);
 
     // Hook errors must not crash the process; return empty on failure.
     let result: Option<String> = match event_type {
         "post-bash" => {
-            let _ = hook_handler::handle_post_bash(cwd, &input);
+            let _ = hook_handler::handle_post_bash(&effective_cwd, &input);
             None
         }
-        "pre-taskupdate" => hook_handler::handle_pre_taskupdate(cwd, &input).unwrap_or(None),
-        "post-edit" => hook_handler::handle_post_edit(cwd, &input).unwrap_or(None),
+        "pre-taskupdate" => {
+            hook_handler::handle_pre_taskupdate(&effective_cwd, &input).unwrap_or(None)
+        }
+        "post-edit" => hook_handler::handle_post_edit(&effective_cwd, &input).unwrap_or(None),
         _ => None,
     };
 
     Ok(result.unwrap_or_default())
+}
+
+fn extract_cwd_from_stdin(stdin_str: &str, fallback: &Path) -> PathBuf {
+    let v: serde_json::Value = serde_json::from_str(stdin_str).unwrap_or_default();
+    v["cwd"]
+        .as_str()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| fallback.to_path_buf())
 }
 
 fn read_stdin() -> Result<String> {
@@ -399,11 +417,11 @@ fn is_gate_action(wf: &crate::config::types::Workflow, step_id: &str, action_ind
         .unwrap_or(false)
 }
 
-fn cmd_exec_step(cwd: &Path, step_id: &str) -> Result<String> {
+fn cmd_exec_step(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result<String> {
     use crate::config::types::Action;
 
     let config = load_config(cwd)?;
-    let state = load_state(cwd)?.context("no workflow in progress")?;
+    let state = resolve_state(cwd, workflow_id)?.context("no workflow in progress")?;
     let wf = config
         .workflows
         .get(&state.workflow)
@@ -415,10 +433,10 @@ fn cmd_exec_step(cwd: &Path, step_id: &str) -> Result<String> {
         .find(|s| s.id == step_id)
         .with_context(|| format!("step '{}' not found in workflow", step_id))?;
 
-    let session_id = state.session_id.clone();
+    let wf_id = state.workflow_id.clone();
 
     for (idx, action) in step.actions.iter().enumerate() {
-        let (exit_code, stdout, stderr) = match action {
+        let (exit_code, stdout, _stderr) = match action {
             Action::Run { command, .. } => {
                 let resolved = engine::executor::resolve_template(command, &config);
                 let result = standalone_runner::run_command(&resolved, cwd)?;
@@ -445,43 +463,27 @@ fn cmd_exec_step(cwd: &Path, step_id: &str) -> Result<String> {
             }
         };
 
-        let report = serde_json::json!({
-            "session_id": session_id,
-            "step_id": step_id,
-            "action_index": idx,
-            "action_type": action_type_name(action),
-            "exit_code": exit_code,
-            "stdout": stdout,
-            "stderr": stderr
-        });
-
-        let input: protocol::input::ReportInput = serde_json::from_value(report)?;
         {
             use chrono::Utc;
             use engine::state::{ActionReport, StepStatus};
-            let mut st = load_state(cwd)?.context("no workflow in progress")?;
+            let mut st = resolve_state(cwd, Some(&wf_id))?.context("no workflow in progress")?;
             {
                 let s = st.steps.entry(step_id.to_string()).or_default();
                 if s.status == StepStatus::Pending {
                     s.status = StepStatus::InProgress;
                     s.started_at = Some(Utc::now());
                 }
-                let is_gate = is_gate_action(wf, step_id, input.action_index);
+                let is_gate = is_gate_action(wf, step_id, idx);
                 if is_gate {
                     s.gate_recorded = true;
                 }
                 s.action_reports.push(ActionReport {
-                    action_index: input.action_index,
-                    action_type: input.action_type.clone(),
-                    exit_code: input.exit_code,
-                    stdout: input.stdout.clone(),
+                    action_index: idx,
+                    action_type: action_type_name(action).to_string(),
+                    exit_code: Some(exit_code),
+                    stdout: Some(stdout.clone()),
                     recorded_at: Utc::now(),
                 });
-                if is_gate {
-                    if let Some(out) = &input.stdout {
-                        append_checklist(cwd, out)?;
-                    }
-                }
             }
             save_state(cwd, &st)?;
         }
@@ -495,7 +497,7 @@ fn cmd_exec_step(cwd: &Path, step_id: &str) -> Result<String> {
         }
     }
 
-    cmd_complete(cwd, step_id)
+    cmd_complete(cwd, step_id, Some(&wf_id))
 }
 
 fn action_type_name(action: &crate::config::types::Action) -> &'static str {
@@ -506,15 +508,4 @@ fn action_type_name(action: &crate::config::types::Action) -> &'static str {
         Action::Skill { .. } => "skill",
         Action::Workflow { .. } => "workflow",
     }
-}
-
-fn append_checklist(cwd: &Path, stdout: &str) -> Result<()> {
-    use chrono::Local;
-    let path = cwd.join(".workflow/checklist.md");
-    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let entry = format!("## Test run: {}\n\n```\n{}\n```\n\n", timestamp, stdout);
-    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
-    existing.push_str(&entry);
-    std::fs::write(path, existing)?;
-    Ok(())
 }

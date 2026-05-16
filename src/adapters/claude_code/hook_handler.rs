@@ -3,17 +3,22 @@ use crate::config::types::Action;
 use crate::engine::gate::hook_check_any_blocked;
 use crate::engine::state::{ActionReport, StepStatus};
 use crate::engine::store::{load_state, save_state};
+use crate::providers::claude_code::hook_parser::{
+    PostBashEvent, PostEditEvent, PreTaskUpdateEvent,
+};
 use anyhow::Result;
-use chrono::Local;
-use serde_json::Value;
 use std::path::Path;
 
 /// Claude Code PostToolUse(Bash) hook.
-/// Detects test command execution and records it in checklist.md and state.json.
+/// Detects test command execution and records it in state (SQLite).
 pub fn handle_post_bash(cwd: &Path, hook_json: &str) -> Result<()> {
-    let v: Value = serde_json::from_str(hook_json)?;
-    let command = v["tool_input"]["command"].as_str().unwrap_or("");
-    let stdout = v["tool_response"]["stdout"].as_str().unwrap_or("");
+    let event: PostBashEvent = match serde_json::from_str(hook_json) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+
+    let command = &event.tool_input.command;
+    let stdout = &event.tool_response.stdout;
 
     let config = match load_config(cwd) {
         Ok(c) => c,
@@ -27,15 +32,6 @@ pub fn handle_post_bash(cwd: &Path, hook_json: &str) -> Result<()> {
 
     if !command.contains(test_cmd) {
         return Ok(());
-    }
-
-    let checklist_path = cwd.join(".workflow/checklist.md");
-    if cwd.join(".workflow").exists() {
-        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let entry = format!("## Test run: {}\n\n```\n{}\n```\n\n", timestamp, stdout);
-        let mut existing = std::fs::read_to_string(&checklist_path).unwrap_or_default();
-        existing.push_str(&entry);
-        std::fs::write(&checklist_path, existing)?;
     }
 
     let mut state = match load_state(cwd)? {
@@ -72,7 +68,7 @@ pub fn handle_post_bash(cwd: &Path, hook_json: &str) -> Result<()> {
                     action_index: 0,
                     action_type: "run".to_string(),
                     exit_code: Some(0),
-                    stdout: Some(stdout.to_string()),
+                    stdout: Some(stdout.clone()),
                     recorded_at: chrono::Utc::now(),
                 };
                 let s = state.steps.entry(sid.clone()).or_default();
@@ -92,9 +88,12 @@ pub fn handle_post_bash(cwd: &Path, hook_json: &str) -> Result<()> {
 /// Claude Code PreToolUse(TaskUpdate) hook.
 /// Outputs a block JSON if any in-progress step has an unrecorded gate action.
 pub fn handle_pre_taskupdate(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
-    let v: Value = serde_json::from_str(hook_json)?;
-    let status = v["tool_input"]["status"].as_str().unwrap_or("");
-    if status != "completed" {
+    let event: PreTaskUpdateEvent = match serde_json::from_str(hook_json) {
+        Ok(e) => e,
+        Err(_) => return Ok(None),
+    };
+
+    if event.tool_input.status != "completed" {
         return Ok(None);
     }
 
@@ -124,10 +123,12 @@ pub fn handle_pre_taskupdate(cwd: &Path, hook_json: &str) -> Result<Option<Strin
 /// Claude Code PostToolUse(Edit/Write) hook.
 /// Outputs a schema warning when config.yml fails validation after an edit.
 pub fn handle_post_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
-    let v: Value = serde_json::from_str(hook_json)?;
-    let file_path = v["tool_input"]["file_path"].as_str().unwrap_or("");
+    let event: PostEditEvent = match serde_json::from_str(hook_json) {
+        Ok(e) => e,
+        Err(_) => return Ok(None),
+    };
 
-    if !file_path.ends_with(".workflow/config.yml") {
+    if !event.tool_input.file_path.ends_with(".workflow/config.yml") {
         return Ok(None);
     }
 
