@@ -1,6 +1,7 @@
 mod adapters;
 mod config;
 mod engine;
+mod infra;
 mod protocol;
 mod providers;
 
@@ -79,6 +80,10 @@ enum Commands {
     },
     /// Execute a step's actions directly (standalone adapter only).
     ExecStep { step_id: String },
+    /// Initialize .workflow/ directory and generate .claude/settings.json.
+    Init,
+    /// Update .claude/settings.json with workflow-runner hooks (preserving existing entries).
+    Update,
 }
 
 fn main() {
@@ -115,6 +120,8 @@ fn run(cmd: Commands, cwd: &Path, adapter: &str, workflow_id: Option<&str>) -> R
         Commands::List => cmd_list(cwd),
         Commands::Hook { event_type } => cmd_hook(cwd, &event_type, adapter),
         Commands::ExecStep { step_id } => cmd_exec_step(cwd, &step_id, workflow_id),
+        Commands::Init => cmd_init(cwd),
+        Commands::Update => cmd_update(cwd),
     }
 }
 
@@ -400,6 +407,8 @@ fn cmd_hook(cwd: &Path, event_type: &str, _adapter: &str) -> Result<String> {
             hook_handler::handle_pre_taskupdate(&effective_cwd, &input).unwrap_or(None)
         }
         "post-edit" => hook_handler::handle_post_edit(&effective_cwd, &input).unwrap_or(None),
+        "pre-edit" => hook_handler::handle_pre_edit(&effective_cwd, &input).unwrap_or(None),
+        "pre-bash" => hook_handler::handle_pre_bash(&effective_cwd, &input).unwrap_or(None),
         _ => None,
     };
 
@@ -506,6 +515,38 @@ fn cmd_exec_step(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result
 
     // cmd_complete handles post_commands gate automatically.
     cmd_complete(cwd, step_id, Some(&wf_id))
+}
+
+fn cmd_init(cwd: &Path) -> Result<String> {
+    let workflow_dir = cwd.join(".workflow");
+    std::fs::create_dir_all(&workflow_dir).context("failed to create .workflow directory")?;
+
+    let in_path = std::process::Command::new("which")
+        .arg("workflow-runner")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !in_path {
+        eprintln!("warning: workflow-runner not found in PATH; ensure it is installed");
+    }
+
+    infra::settings_writer::write_settings_json(cwd)?;
+
+    let out = serde_json::json!({
+        "ok": true,
+        "message": "initialized: .workflow/ and .claude/settings.json created"
+    });
+    Ok(serde_json::to_string_pretty(&out)?)
+}
+
+fn cmd_update(cwd: &Path) -> Result<String> {
+    infra::settings_writer::merge_settings_json(cwd)?;
+
+    let out = serde_json::json!({
+        "ok": true,
+        "message": "updated: .claude/settings.json merged with workflow-runner hooks"
+    });
+    Ok(serde_json::to_string_pretty(&out)?)
 }
 
 fn action_type_name(action: &crate::config::types::Action) -> &'static str {

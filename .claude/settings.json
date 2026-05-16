@@ -2,50 +2,68 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Bash",
         "hooks": [
           {
-            "type": "command",
-            "command": ".claude/hooks/post-bash-capture-test.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": ".claude/hooks/post-edit-validate-config.sh"
+            "command": "workflow-runner hook post-edit",
+            "type": "command"
           },
           {
-            "type": "command",
-            "command": ".claude/hooks/post-edit-rust-checks.sh"
+            "command": ".claude/hooks/post-edit-rust-checks.sh",
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": "Edit"
       },
       {
-        "matcher": "Write",
         "hooks": [
           {
-            "type": "command",
-            "command": ".claude/hooks/post-edit-validate-config.sh"
+            "command": "workflow-runner hook post-edit",
+            "type": "command"
           },
           {
-            "type": "command",
-            "command": ".claude/hooks/post-edit-rust-checks.sh"
+            "command": ".claude/hooks/post-edit-rust-checks.sh",
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": "Write"
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "TaskUpdate",
         "hooks": [
           {
-            "type": "command",
-            "command": ".claude/hooks/pre-taskupdate-gate.sh"
+            "command": "workflow-runner hook pre-taskupdate",
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": "TaskUpdate"
+      },
+      {
+        "hooks": [
+          {
+            "command": "workflow-runner hook pre-edit",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit"
+      },
+      {
+        "hooks": [
+          {
+            "command": "workflow-runner hook pre-edit",
+            "type": "command"
+          }
+        ],
+        "matcher": "Write"
+      },
+      {
+        "hooks": [
+          {
+            "command": "workflow-runner hook pre-bash",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
       }
     ]
   }
