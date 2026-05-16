@@ -86,6 +86,8 @@ aidd-workflow/
 │   │       ├── runner.rs                run_command（Shell）
 │   │       └── channels.rs             Claude Code Channels クライアント（Phase 4）
 │   ├── providers/
+│   │   ├── channels/
+│   │   │   └── mod.rs                   `claude -p` 経由の Claude Code Channels 呼び出し（Pure）
 │   │   └── claude_code/
 │   │       └── hook_parser.rs           Claude Code hook JSON → 型安全な構造体（Pure）
 │   ├── infra/
@@ -428,6 +430,7 @@ design ──▶ implement ──▶ quality-check ──▶ complete
 | 層 | 責務 | 具体例 |
 |----|------|--------|
 | `providers/claude_code/` | Claude Code 固有の hook JSON を型安全な構造体にパース | `PostBashEvent`, `PreEditEvent` |
+| `providers/channels/` | `claude -p` 経由の Claude Code Channels 呼び出し | `run_prompt()` |
 | `adapters/claude_code/` | パース済みイベントを受け取り、engine 層を呼んで `HookResponse` を返す | `handle_pre_edit()` |
 | `adapters/standalone/` | シェルコマンド実行・Channels API 呼び出し | `run_command()`, `run_agent()` |
 
