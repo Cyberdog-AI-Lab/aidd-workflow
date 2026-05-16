@@ -91,20 +91,13 @@ mod tests {
                 Step {
                     id: "a".to_string(),
                     name: "A".to_string(),
-                    description: None,
-                    actions: vec![],
-                    parallel: None,
-                    checklist_key: None,
-                    requires: vec![],
+                    ..Step::default()
                 },
                 Step {
                     id: "b".to_string(),
                     name: "B".to_string(),
-                    description: None,
-                    actions: vec![],
-                    parallel: None,
-                    checklist_key: None,
                     requires: vec!["a".to_string()],
+                    ..Step::default()
                 },
             ],
         }
@@ -117,8 +110,6 @@ mod tests {
             steps: vec![Step {
                 id: "p".to_string(),
                 name: "Parallel".to_string(),
-                description: None,
-                actions: vec![],
                 parallel: Some(vec![
                     SubStep {
                         id: "x".to_string(),
@@ -135,8 +126,7 @@ mod tests {
                         requires: vec![],
                     },
                 ]),
-                checklist_key: None,
-                requires: vec![],
+                ..Step::default()
             }],
         }
     }
@@ -204,8 +194,6 @@ mod tests {
             steps: vec![Step {
                 id: "p".to_string(),
                 name: "Parallel".to_string(),
-                description: None,
-                actions: vec![],
                 parallel: Some(vec![
                     SubStep {
                         id: "x".to_string(),
@@ -222,8 +210,7 @@ mod tests {
                         requires: vec!["x".to_string()],
                     },
                 ]),
-                checklist_key: None,
-                requires: vec![],
+                ..Step::default()
             }],
         }
     }

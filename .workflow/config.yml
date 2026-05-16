@@ -2,6 +2,11 @@
 # workflow-orchestrator 設定ファイル
 # このファイルをプロジェクトルートの .workflow/config.yml に置く
 
+# 他ファイルへの分割（imports: で複数ファイルに切り出せる）
+# imports:
+#   - commands/default.yml
+#   - workflows/extra.yml
+
 # プロジェクト固有のコマンド定義（Makefile の target 名を登録する）
 commands:
   test: make test
@@ -17,29 +22,27 @@ workflows:
       - id: reproduce
         name: 再現確認
         description: バグを手元で再現し、再現手順（環境・操作・期待値・実際の挙動）を記録する
-        checklist_key: reproduce
 
       - id: identify
         name: 原因特定
-        description: 原因となるファイル・関数・行を特定してチェックリストに記録する
-        checklist_key: identify
+        description: 原因となるファイル・関数・行を特定して記録する
 
       - id: implement
         name: 修正実装
         description: 最小限の変更でバグを修正する。影響範囲を意識すること
-
-      - id: test
-        name: テスト実行
-        description: "make test を実行してテストがパスすることを確認する（ゲート：テスト実行記録が必須）"
-        actions:
-          - type: run
-            command: "{{commands.test}}"
-            gate: true
+        allow_files:
+          - "src/**"
+          - "tests/**"
+        pre_commands:
+          - "{{commands.build}}"
+        post_commands:
+          - "{{commands.test}}"
+        requires: [reproduce, identify]
 
       - id: complete
         name: 完了判定
         description: すべてのステップが完了したことを確認し、作業を完了とマークする
-        requires: [reproduce, identify, test]
+        requires: [implement]
 
   feature:
     name: 機能開発フロー
@@ -48,24 +51,31 @@ workflows:
       - id: design
         name: 設計確認
         description: 実装方針・影響範囲・インターフェースを整理して記録する
-        checklist_key: design
+        allow_files:
+          - "docs/**"
+          - "/.*\\.md$/"
 
       - id: implement
         name: 実装
         description: 設計に従って実装する
-
-      - id: test
-        name: テスト実行
-        description: "make test を実行してテストがパスすることを確認する（ゲート：テスト実行記録が必須）"
-        actions:
-          - type: run
-            command: "{{commands.test}}"
-            gate: true
+        allow_files:
+          - "src/**"
+          - "tests/**"
+        deny:
+          files:
+            - "docs/specs/**"
+        pre_commands:
+          - "{{commands.build}}"
+        post_commands:
+          - "{{commands.test}}"
+        guards:
+          - step: design
+        requires: [design]
 
       - id: complete
         name: 完了判定
         description: 実装・テストが完了したことを確認する
-        requires: [design, test]
+        requires: [implement]
 
   release:
     name: リリースフロー
@@ -74,12 +84,16 @@ workflows:
       - id: design
         name: 設計確認
         description: 実装方針・影響範囲・インターフェースを整理して記録する
-        checklist_key: design
+        allow_files:
+          - "docs/**"
 
       - id: implement
         name: 実装
         description: 設計に従って実装する
         requires: [design]
+        allow_files:
+          - "src/**"
+          - "tests/**"
 
       - id: quality-check
         name: 品質チェック（並列）
@@ -88,14 +102,13 @@ workflows:
           - id: run-test
             name: テスト実行
             actions:
-              - type: run
-                command: "{{commands.test}}"
-                gate: true
+              - type: agent
+                prompt: "{{commands.test}} を実行してテストがすべてパスすることを確認してください"
           - id: run-lint
             name: Lint
             actions:
-              - type: run
-                command: "{{commands.lint}}"
+              - type: agent
+                prompt: "{{commands.lint}} を実行して Lint が通ることを確認してください"
 
       - id: complete
         name: 完了判定

@@ -176,12 +176,8 @@ fn cmd_report(cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
         }
     }
 
-    let is_gate = is_gate_action(wf, &input.step_id, input.action_index);
     {
         let s = state.steps.entry(input.step_id.clone()).or_default();
-        if is_gate {
-            s.gate_recorded = true;
-        }
         s.action_reports.push(ActionReport {
             action_index: input.action_index,
             action_type: input.action_type.clone(),
@@ -209,7 +205,45 @@ fn cmd_complete(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result<
         .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
-    let gate_result = gate::check(wf, &state, step_id);
+    // Run post_commands as the gate before allowing Complete.
+    if let Some(step) = wf.steps.iter().find(|s| s.id == step_id) {
+        if !step.post_commands.is_empty() {
+            let already_recorded = state
+                .steps
+                .get(step_id)
+                .map(|s| s.gate_recorded)
+                .unwrap_or(false);
+
+            if !already_recorded {
+                let resolved: Vec<String> = step
+                    .post_commands
+                    .iter()
+                    .map(|c| executor::resolve_template(c, &config))
+                    .collect();
+
+                for cmd in &resolved {
+                    let result = standalone_runner::run_command(cmd, cwd)?;
+                    if result.exit_code != 0 {
+                        let output = CompleteOutput {
+                            step_id: step_id.to_string(),
+                            allowed: false,
+                            reason: Some(format!(
+                                "post_commands gate failed: '{}' exited with code {}",
+                                cmd, result.exit_code
+                            )),
+                            next: None,
+                        };
+                        return Ok(serde_json::to_string_pretty(&output)?);
+                    }
+                }
+
+                let s = state.steps.entry(step_id.to_string()).or_default();
+                s.gate_recorded = true;
+            }
+        }
+    }
+
+    let gate_result = gate::check(wf, &state, step_id, cwd);
     if !gate_result.allowed {
         let output = CompleteOutput {
             step_id: step_id.to_string(),
@@ -387,36 +421,6 @@ fn read_stdin() -> Result<String> {
     Ok(buf)
 }
 
-fn is_gate_action(wf: &crate::config::types::Workflow, step_id: &str, action_index: usize) -> bool {
-    use crate::config::types::Action;
-
-    let (cfg_step_id, sub_id) = if let Some(idx) = step_id.find('/') {
-        (&step_id[..idx], Some(&step_id[idx + 1..]))
-    } else {
-        (step_id, None)
-    };
-
-    let step = match wf.steps.iter().find(|s| s.id == cfg_step_id) {
-        Some(s) => s,
-        None => return false,
-    };
-
-    let actions: &[Action] = if let Some(sub) = sub_id {
-        let parallel = step.parallel.as_deref().unwrap_or(&[]);
-        match parallel.iter().find(|s| s.id == sub) {
-            Some(s) => &s.actions,
-            None => return false,
-        }
-    } else {
-        &step.actions
-    };
-
-    actions
-        .get(action_index)
-        .map(|a| matches!(a, Action::Run { gate: true, .. }))
-        .unwrap_or(false)
-}
-
 fn cmd_exec_step(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result<String> {
     use crate::config::types::Action;
 
@@ -435,15 +439,22 @@ fn cmd_exec_step(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result
 
     let wf_id = state.workflow_id.clone();
 
+    // Run pre_commands before the step body.
+    for cmd in &step.pre_commands {
+        let resolved = executor::resolve_template(cmd, &config);
+        let result = standalone_runner::run_command(&resolved, cwd)?;
+        eprintln!("{}", result.stderr.trim_end());
+        if result.exit_code != 0 {
+            anyhow::bail!(
+                "pre_commands failed: '{}' exited with code {}",
+                resolved,
+                result.exit_code
+            );
+        }
+    }
+
     for (idx, action) in step.actions.iter().enumerate() {
         let (exit_code, stdout, _stderr) = match action {
-            Action::Run { command, .. } => {
-                let resolved = engine::executor::resolve_template(command, &config);
-                let result = standalone_runner::run_command(&resolved, cwd)?;
-                eprintln!("{}", result.stderr.trim_end());
-                print!("{}", result.stdout);
-                (result.exit_code, result.stdout, result.stderr)
-            }
             Action::Agent { prompt, .. } => {
                 let text = standalone_runner::call_anthropic_api(prompt)?;
                 println!("{}", text);
@@ -473,10 +484,6 @@ fn cmd_exec_step(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result
                     s.status = StepStatus::InProgress;
                     s.started_at = Some(Utc::now());
                 }
-                let is_gate = is_gate_action(wf, step_id, idx);
-                if is_gate {
-                    s.gate_recorded = true;
-                }
                 s.action_reports.push(ActionReport {
                     action_index: idx,
                     action_type: action_type_name(action).to_string(),
@@ -490,20 +497,20 @@ fn cmd_exec_step(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result
 
         if exit_code != 0 {
             anyhow::bail!(
-                "command exited with code {}; aborting step '{}'",
+                "action exited with code {}; aborting step '{}'",
                 exit_code,
                 step_id
             );
         }
     }
 
+    // cmd_complete handles post_commands gate automatically.
     cmd_complete(cwd, step_id, Some(&wf_id))
 }
 
 fn action_type_name(action: &crate::config::types::Action) -> &'static str {
     use crate::config::types::Action;
     match action {
-        Action::Run { .. } => "run",
         Action::Agent { .. } => "agent",
         Action::Skill { .. } => "skill",
         Action::Workflow { .. } => "workflow",

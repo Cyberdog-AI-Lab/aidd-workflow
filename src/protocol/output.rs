@@ -30,6 +30,12 @@ pub struct ActionItem {
     /// When true, this item is part of a parallel block and may run concurrently
     /// with other parallel=true items in the same response.
     pub parallel: bool,
+    /// Commands run before the step body (informational — Claude should execute these).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pre_commands: Vec<String>,
+    /// Commands that act as a gate before Complete is allowed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub post_commands: Vec<String>,
     #[serde(flatten)]
     pub action: ResolvedAction,
 }
@@ -37,10 +43,6 @@ pub struct ActionItem {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResolvedAction {
-    Run {
-        command: String,
-        gate: bool,
-    },
     Agent {
         prompt: String,
         background: bool,
@@ -56,7 +58,6 @@ pub enum ResolvedAction {
     /// Step with no actions and no parallel block; Claude works from the description.
     Manual {
         description: String,
-        checklist_key: Option<String>,
     },
 }
 
@@ -203,8 +204,12 @@ mod tests {
                 description: None,
                 actions: vec![],
                 parallel: None,
-                checklist_key: None,
                 requires: vec![],
+                pre_commands: vec![],
+                post_commands: vec![],
+                allow_files: vec![],
+                deny: None,
+                guards: vec![],
             }],
         }
     }
@@ -255,8 +260,12 @@ mod tests {
                         requires: vec![],
                     },
                 ]),
-                checklist_key: None,
                 requires: vec![],
+                pre_commands: vec![],
+                post_commands: vec![],
+                allow_files: vec![],
+                deny: None,
+                guards: vec![],
             }],
         };
         let state = WorkflowState::new("test", &wf);

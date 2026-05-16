@@ -5,6 +5,11 @@
   "required": ["commands", "workflows"],
   "additionalProperties": false,
   "properties": {
+    "imports": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "追加でロードする YAML ファイルのパス（.workflow/ 相対）"
+    },
     "commands": {
       "type": "object",
       "properties": {
@@ -40,9 +45,9 @@
       "required": ["id", "name"],
       "additionalProperties": false,
       "properties": {
-        "id":            { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
-        "name":          { "type": "string" },
-        "description":   { "type": "string" },
+        "id":          { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "name":        { "type": "string" },
+        "description": { "type": "string" },
         "actions": {
           "type": "array",
           "items": { "$ref": "#/definitions/action" },
@@ -53,15 +58,31 @@
           "items": { "$ref": "#/definitions/sub_step" },
           "description": "並列実行するサブステップ（actions と同時指定不可）"
         },
-        "checklist_key": {
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9_-]*$",
-          "description": "手動記録を促すキー（manual ステップで使用）"
-        },
         "requires": {
           "type": "array",
           "items": { "type": "string" },
           "description": "完了に必要な他ステップの id"
+        },
+        "pre_commands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "ステップ開始時に自動実行するコマンド"
+        },
+        "post_commands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "ステップ完了前にゲートとして実行するコマンド"
+        },
+        "allow_files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "InProgress 中に編集を許可するファイルパターン（glob または /regex/）"
+        },
+        "deny": { "$ref": "#/definitions/deny_rules" },
+        "guards": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/guard" },
+          "description": "このステップを開始する前に満たすべき条件"
         }
       }
     },
@@ -84,29 +105,52 @@
         }
       }
     },
+    "deny_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "編集を禁止するファイルパターン（glob または /regex/）"
+        },
+        "commands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "実行を禁止するコマンドパターン（部分一致）"
+        }
+      }
+    },
+    "guard": {
+      "type": "object",
+      "required": ["step"],
+      "additionalProperties": false,
+      "properties": {
+        "step": {
+          "type": "string",
+          "description": "完了済みである必要があるステップの id"
+        },
+        "required_files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "存在が必要なファイルパターン（glob または /regex/）"
+        }
+      }
+    },
     "action": {
       "type": "object",
       "required": ["type"],
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["run", "agent", "skill", "workflow"]
+          "enum": ["agent", "skill", "workflow"]
         }
       },
       "oneOf": [
-        { "$ref": "#/definitions/action_run" },
         { "$ref": "#/definitions/action_agent" },
         { "$ref": "#/definitions/action_skill" },
         { "$ref": "#/definitions/action_workflow" }
       ]
-    },
-    "action_run": {
-      "properties": {
-        "type":    { "const": "run" },
-        "command": { "type": "string", "description": "実行するコマンド（{{commands.test}} 形式のテンプレート使用可）" },
-        "gate":    { "type": "boolean", "description": "true のとき実行記録が complete の必須条件になる" }
-      },
-      "required": ["type", "command"]
     },
     "action_agent": {
       "properties": {

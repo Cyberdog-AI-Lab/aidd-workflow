@@ -117,8 +117,6 @@ mod tests {
             steps: vec![Step {
                 id: "parent".to_string(),
                 name: "Parent".to_string(),
-                description: None,
-                actions: vec![],
                 parallel: Some(vec![
                     SubStep {
                         id: "a".to_string(),
@@ -135,8 +133,7 @@ mod tests {
                         requires: vec![],
                     },
                 ]),
-                checklist_key: None,
-                requires: vec![],
+                ..Step::default()
             }],
         }
     }

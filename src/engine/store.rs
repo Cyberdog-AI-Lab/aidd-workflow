@@ -299,11 +299,7 @@ mod tests {
             steps: vec![Step {
                 id: "step1".to_string(),
                 name: "Step 1".to_string(),
-                description: None,
-                actions: vec![],
-                parallel: None,
-                checklist_key: None,
-                requires: vec![],
+                ..Step::default()
             }],
         }
     }

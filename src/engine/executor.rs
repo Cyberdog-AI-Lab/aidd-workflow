@@ -30,9 +30,10 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
                         action_index: 0,
                         step_name: step_name.to_string(),
                         parallel: true,
+                        pre_commands: vec![],
+                        post_commands: vec![],
                         action: ResolvedAction::Manual {
                             description: sub.description.clone().unwrap_or_default(),
-                            checklist_key: None,
                         },
                     });
                 } else {
@@ -42,6 +43,8 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
                             action_index: i,
                             step_name: step_name.to_string(),
                             parallel: true,
+                            pre_commands: vec![],
+                            post_commands: vec![],
                             action: resolve(action, config),
                         });
                     }
@@ -55,9 +58,10 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
                     action_index: 0,
                     step_name: step.name.clone(),
                     parallel: false,
+                    pre_commands: resolve_commands(&step.pre_commands, config),
+                    post_commands: resolve_commands(&step.post_commands, config),
                     action: ResolvedAction::Manual {
                         description: step.description.clone().unwrap_or_default(),
-                        checklist_key: step.checklist_key.clone(),
                     },
                 });
             } else {
@@ -67,6 +71,16 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
                         action_index: i,
                         step_name: step.name.clone(),
                         parallel: false,
+                        pre_commands: if i == 0 {
+                            resolve_commands(&step.pre_commands, config)
+                        } else {
+                            vec![]
+                        },
+                        post_commands: if i == step.actions.len() - 1 {
+                            resolve_commands(&step.post_commands, config)
+                        } else {
+                            vec![]
+                        },
                         action: resolve(action, config),
                     });
                 }
@@ -88,10 +102,6 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
 
 fn resolve(action: &Action, config: &Config) -> ResolvedAction {
     match action {
-        Action::Run { command, gate } => ResolvedAction::Run {
-            command: resolve_template(command, config),
-            gate: *gate,
-        },
         Action::Agent { prompt, background } => ResolvedAction::Agent {
             prompt: resolve_template(prompt, config),
             background: *background,
@@ -105,6 +115,10 @@ fn resolve(action: &Action, config: &Config) -> ResolvedAction {
             inputs: inputs.clone(),
         },
     }
+}
+
+fn resolve_commands(cmds: &[String], config: &Config) -> Vec<String> {
+    cmds.iter().map(|c| resolve_template(c, config)).collect()
 }
 
 pub fn resolve_template(s: &str, config: &Config) -> String {
@@ -126,12 +140,13 @@ mod tests {
         let mut commands = HashMap::new();
         commands.insert("test".to_string(), cmd.to_string());
         Config {
+            imports: vec![],
             commands,
             workflows: HashMap::new(),
         }
     }
 
-    fn workflow_with_run_action() -> Workflow {
+    fn workflow_with_agent_action() -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
@@ -139,13 +154,17 @@ mod tests {
                 id: "run".to_string(),
                 name: "Run".to_string(),
                 description: None,
-                actions: vec![Action::Run {
-                    command: "{{commands.test}}".to_string(),
-                    gate: false,
+                actions: vec![Action::Agent {
+                    prompt: "do the thing".to_string(),
+                    background: false,
                 }],
                 parallel: None,
-                checklist_key: None,
                 requires: vec![],
+                pre_commands: vec![],
+                post_commands: vec![],
+                allow_files: vec![],
+                deny: None,
+                guards: vec![],
             }],
         }
     }
@@ -160,8 +179,12 @@ mod tests {
                 description: Some("Write the design doc".to_string()),
                 actions: vec![],
                 parallel: None,
-                checklist_key: Some("design".to_string()),
                 requires: vec![],
+                pre_commands: vec![],
+                post_commands: vec!["make docs-check".to_string()],
+                allow_files: vec![],
+                deny: None,
+                guards: vec![],
             }],
         }
     }
@@ -181,30 +204,31 @@ mod tests {
     }
 
     #[test]
-    fn build_next_returns_run_action_with_resolved_command() {
-        let wf = workflow_with_run_action();
+    fn build_next_returns_agent_action() {
+        let wf = workflow_with_agent_action();
         let config = config_with_test_cmd("make test");
         let state = WorkflowState::new("test", &wf);
 
         let output = build_next(&wf, &state, &config);
         assert_eq!(output.actions.len(), 1);
         match &output.actions[0].action {
-            ResolvedAction::Run { command, .. } => assert_eq!(command, "make test"),
-            _ => panic!("expected Run"),
+            ResolvedAction::Agent { prompt, .. } => assert_eq!(prompt, "do the thing"),
+            _ => panic!("expected Agent"),
         }
     }
 
     #[test]
-    fn build_next_returns_manual_for_no_action_step() {
+    fn build_next_returns_manual_with_post_commands() {
         let wf = workflow_manual();
         let config = config_with_test_cmd("make test");
         let state = WorkflowState::new("test", &wf);
 
         let output = build_next(&wf, &state, &config);
         assert_eq!(output.actions.len(), 1);
+        assert_eq!(output.actions[0].post_commands, vec!["make docs-check"]);
         match &output.actions[0].action {
-            ResolvedAction::Manual { checklist_key, .. } => {
-                assert_eq!(checklist_key.as_deref(), Some("design"));
+            ResolvedAction::Manual { description } => {
+                assert_eq!(description, "Write the design doc");
             }
             _ => panic!("expected Manual"),
         }
@@ -226,9 +250,9 @@ mod tests {
                         id: "x".to_string(),
                         name: None,
                         description: None,
-                        actions: vec![Action::Run {
-                            command: "cmd".to_string(),
-                            gate: false,
+                        actions: vec![Action::Agent {
+                            prompt: "do x".to_string(),
+                            background: false,
                         }],
                         requires: vec![],
                     },
@@ -236,15 +260,19 @@ mod tests {
                         id: "y".to_string(),
                         name: None,
                         description: None,
-                        actions: vec![Action::Run {
-                            command: "cmd2".to_string(),
-                            gate: false,
+                        actions: vec![Action::Agent {
+                            prompt: "do y".to_string(),
+                            background: false,
                         }],
                         requires: vec![],
                     },
                 ]),
-                checklist_key: None,
                 requires: vec![],
+                pre_commands: vec![],
+                post_commands: vec![],
+                allow_files: vec![],
+                deny: None,
+                guards: vec![],
             }],
         };
         let config = config_with_test_cmd("make test");
@@ -258,7 +286,7 @@ mod tests {
 
     #[test]
     fn sequential_step_action_has_parallel_false() {
-        let wf = workflow_with_run_action();
+        let wf = workflow_with_agent_action();
         let config = config_with_test_cmd("make test");
         let state = WorkflowState::new("test", &wf);
 
@@ -268,7 +296,7 @@ mod tests {
 
     #[test]
     fn build_next_returns_completed_when_all_done() {
-        let wf = workflow_with_run_action();
+        let wf = workflow_with_agent_action();
         let config = config_with_test_cmd("make test");
         let mut state = WorkflowState::new("test", &wf);
         state.steps.get_mut("run").unwrap().status = StepStatus::Completed;
@@ -276,5 +304,45 @@ mod tests {
         let output = build_next(&wf, &state, &config);
         assert!(matches!(output.status, FlowStatus::Completed));
         assert!(output.actions.is_empty());
+    }
+
+    #[test]
+    fn pre_commands_on_first_action_only() {
+        use crate::config::types::Action;
+        let wf = Workflow {
+            name: "test".to_string(),
+            description: None,
+            steps: vec![Step {
+                id: "s".to_string(),
+                name: "S".to_string(),
+                description: None,
+                actions: vec![
+                    Action::Agent {
+                        prompt: "first".to_string(),
+                        background: false,
+                    },
+                    Action::Agent {
+                        prompt: "second".to_string(),
+                        background: false,
+                    },
+                ],
+                parallel: None,
+                requires: vec![],
+                pre_commands: vec!["cargo check".to_string()],
+                post_commands: vec!["cargo test".to_string()],
+                allow_files: vec![],
+                deny: None,
+                guards: vec![],
+            }],
+        };
+        let config = config_with_test_cmd("make test");
+        let state = WorkflowState::new("test", &wf);
+
+        let output = build_next(&wf, &state, &config);
+        assert_eq!(output.actions.len(), 2);
+        assert_eq!(output.actions[0].pre_commands, vec!["cargo check"]);
+        assert!(output.actions[0].post_commands.is_empty());
+        assert!(output.actions[1].pre_commands.is_empty());
+        assert_eq!(output.actions[1].post_commands, vec!["cargo test"]);
     }
 }
