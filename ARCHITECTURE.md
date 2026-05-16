@@ -492,30 +492,3 @@ workflow-runner --adapter standalone exec-step <step-id>
 | `tempfile` | 3 | テスト用一時ディレクトリ（dev-dependency） |
 
 > **廃止予定**: `reqwest`（Anthropic API 直接呼び出しが Claude Code Channels に移行後）
-
----
-
-## 実装状況
-
-### v1〜v4（完了）
-
-- [x] Rust コア（config / engine / protocol）
-- [x] Claude Code アダプター（3種のフック処理）
-- [x] CLI（10 コマンド）
-- [x] `gate: true` による決定論的なゲート制御
-- [x] `requires` による DAG 依存解決
-- [x] `{{commands.*}}` テンプレート変数解決
-- [x] 並列ステップの状態管理（`parent_id/sub_id` キー）
-- [x] `standalone` アダプター（`run_command` / `call_anthropic_api`）
-- [x] `exec-step` CLI サブコマンド
-- [x] `validate --format text` / `status --format table`
-- [x] バイナリ配布（`install.sh` + GitHub Actions）
-- [x] FCIS 準拠（Pure core / Shell 分離）
-- [x] 51 ユニットテスト（全パス）
-
-### v5（計画中）→ [PLAN.md](./PLAN.md) を参照
-
-- [ ] **Phase 1**: SQLite 導入 + `providers/` 層追加 + `--workflow-id` 対応
-- [ ] **Phase 2**: `imports:` / `pre_commands` / `post_commands` / `allow_files` / `deny` / `guards` + `Action::Run` 廃止
-- [ ] **Phase 3**: `init`/`update` コマンド + シェルスクリプト Hook 廃止 + `pre-edit`/`pre-bash` hook 追加
-- [ ] **Phase 4**: Claude Code Channels 対応（`standalone` アダプター刷新・`reqwest` 廃止）
