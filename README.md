@@ -179,11 +179,11 @@ src/                             # workflow-runner（Rust）
 ├── config/                      YAML パース・型定義・imports 解決
 ├── engine/                      DAG 評価・SQLite 状態管理・gate/guards チェック
 ├── adapters/
-│   ├── claude_code/             Claude Code フック処理（providers 経由）
+│   ├── hooks/                   Claude Code フック処理（providers 経由）
 │   └── standalone/              run_command / Claude Code Channels
 ├── providers/
-│   ├── channels/                `claude -p` 経由の Claude Code Channels 呼び出し
 │   └── claude_code/             Claude Code hook JSON → 型安全な構造体
+│       └── channels/            `claude -p` 経由の Claude Code Channels 呼び出し
 ├── infra/                       settings.json 生成（init/update コマンド）
 └── protocol/                    JSON 入出力型・テーブルフォーマッター
 

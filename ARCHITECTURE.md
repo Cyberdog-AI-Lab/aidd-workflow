@@ -80,15 +80,15 @@ aidd-workflow/
 │   │   ├── gate.rs                      gate 条件 + guards チェック（Pure）
 │   │   └── executor.rs                  next_actions の構築・pre/post_commands 付与（Pure）
 │   ├── adapters/
-│   │   ├── claude_code/
+│   │   ├── hooks/
 │   │   │   └── hook_handler.rs          Claude Code フック処理（providers 経由・Shell）
 │   │   └── standalone/
 │   │       ├── runner.rs                run_command（Shell）
 │   │       └── channels.rs             Claude Code Channels クライアント（Phase 4）
 │   ├── providers/
-│   │   ├── channels/
-│   │   │   └── mod.rs                   `claude -p` 経由の Claude Code Channels 呼び出し（Pure）
 │   │   └── claude_code/
+│   │       ├── channels/
+│   │       │   └── mod.rs               `claude -p` 経由の Claude Code Channels 呼び出し（Pure）
 │   │       └── hook_parser.rs           Claude Code hook JSON → 型安全な構造体（Pure）
 │   ├── infra/
 │   │   └── settings_writer.rs           .claude/settings.json の生成・更新（Shell）
@@ -430,8 +430,8 @@ design ──▶ implement ──▶ quality-check ──▶ complete
 | 層 | 責務 | 具体例 |
 |----|------|--------|
 | `providers/claude_code/` | Claude Code 固有の hook JSON を型安全な構造体にパース | `PostBashEvent`, `PreEditEvent` |
-| `providers/channels/` | `claude -p` 経由の Claude Code Channels 呼び出し | `run_prompt()` |
-| `adapters/claude_code/` | パース済みイベントを受け取り、engine 層を呼んで `HookResponse` を返す | `handle_pre_edit()` |
+| `providers/claude_code/channels/` | `claude -p` 経由の Claude Code Channels 呼び出し | `run_prompt()` |
+| `adapters/hooks/` | パース済みイベントを受け取り、engine 層を呼んで `HookResponse` を返す | `handle_pre_edit()` |
 | `adapters/standalone/` | シェルコマンド実行・Channels API 呼び出し | `run_command()`, `run_agent()` |
 
 `adapters/` は `providers/` を使うが、具体的な JSON 形式を知らない。
@@ -474,7 +474,7 @@ workflow-runner --adapter standalone exec-step <step-id>
 
 | アクション型 | 実行方法 |
 |-------------|---------|
-| `agent` | `providers::channels`（`claude -p`）経由で Claude Code Channels API を呼び出す |
+| `agent` | `providers::claude_code::channels`（`claude -p`）経由で Claude Code Channels API を呼び出す |
 
 ---
 
