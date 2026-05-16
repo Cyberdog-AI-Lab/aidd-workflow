@@ -261,6 +261,7 @@ pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
 }
 
 /// Marks the single active workflow as completed.
+#[allow(dead_code)]
 pub fn clear_state(cwd: &Path) -> Result<()> {
     let conn = open_db(cwd)?;
     let cwd_str = cwd.to_string_lossy();
