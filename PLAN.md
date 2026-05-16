@@ -1,462 +1,408 @@
-# aidd-workflow 次世代アーキテクチャ計画
+# v5 実装計画
 
-## 1. 背景と目的
-
-### 現行設計の課題
-
-| 課題 | 説明 |
-|------|------|
-| 非決定論的な実行 | ステップの「何をするか」を Claude が description から解釈するため、同じ config でも挙動が変わる |
-| Bash フックの脆弱性 | gate ロジックがシェルスクリプトに散在。Python インライン埋め込み、文字列パースに依存 |
-| シングルゲート | `gate` は `test` コマンド一種類のみ想定。任意のコマンドやエージェントをゲートにできない |
-| 直列実行のみ | 並列化の仕組みがなく、独立したステップも順番待ちになる |
-| Claude Code 固有 | Tasks API・Hooks・Skills はすべて Claude Code 専用。他の AI ツールへの移植経路がない |
-
-### 目標
-
-1. **決定論的制御**: `config.yml` に書かれた内容が機械的に実行される。Claude の解釈に依存しない
-2. **任意アクション**: シェルコマンド・サブエージェント・スキル・別ワークフロー を統一的に記述できる
-3. **並列実行**: 依存関係のないステップを DAG として評価し、並走させる
-4. **拡張性**: 現在は Claude Code をターゲットにするが、アダプター層で他の AI ツールにも対応できる
+v4 までの実装（SQLite なし・シェルスクリプト Hooks・単一ワークフロー）から、
+複数ワークフロー同時進行・ステップ単位のファイル制約・providers 分離・Claude Code Channels 対応への移行計画。
 
 ---
 
-## 2. 新アーキテクチャ概要
+## 変更の全体像
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    AI ツール層                            │
-│   Claude Code Skill       Cursor Extension   Generic     │
-│   (SKILL.md が薄い        (将来対応)          API Client  │
-│    ラッパーになる)                            (将来対応)  │
-└────────────┬────────────────────────────────────────────┘
-             │ CLI 呼び出し（JSON 入出力）
-┌────────────▼────────────────────────────────────────────┐
-│              workflow-runner（Rust バイナリ）             │
-│                                                          │
-│  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐  │
-│  │ Config層     │  │ Engine層     │  │ Adapter層      │  │
-│  │ YAML パース  │  │ DAG 評価     │  │ claude-code    │  │
-│  │ スキーマ検証 │  │ State 管理   │  │ cursor (将来)  │  │
-│  │ 型安全な定義 │  │ Action Disp. │  │ standalone     │  │
-│  └─────────────┘  └──────────────┘  └────────────────┘  │
-└────────────┬────────────────────────────────────────────┘
-             │ ファイル I/O
-┌────────────▼────────────────────────────────────────────┐
-│                   状態層（ファイル）                       │
-│   .workflow/config.yml    .workflow/state.json           │
-│   .workflow/checklist.md  .workflow/workflow.schema.json │
-└─────────────────────────────────────────────────────────┘
-```
-
-**設計原則**: Rust バイナリが「何をすべきか」を決定し、AI ツールが「どう実行するか」を担う。
-両者は JSON を介した CLI プロトコルで通信する。
+| カテゴリ | v4 (現状) | v5 (目標) |
+|---------|-----------|-----------|
+| 状態管理 | `.workflow/state.json`（単一ワークフロー） | `.workflow/workflow.db`（SQLite・複数並行） |
+| 作業記録 | `.workflow/checklist.md` | SQLite（`action_reports` テーブル） |
+| ワークフロー識別 | 暗黙（1つのみ） | `--workflow-id <session_id>` |
+| 設定ファイル | 単一 `config.yml` | `imports:` で複数ファイルに分割可 |
+| コマンド定義 | `config.yml` 内の `commands:` | 別ファイルに切り出して `imports:` |
+| ステップ制約 | なし | `allow_files` / `deny` / `guards` |
+| シェルコマンド宣言 | `actions: [{type: run}]` | `pre_commands` / `post_commands` |
+| Hook 方式 | シェルスクリプト経由 | `workflow-runner hook <event>` 直接呼び出し |
+| Hook 設定 | 手動で `settings.json` を管理 | `workflow-runner init/update` で自動生成 |
+| AI 依存の隔離 | `adapters/` に混在 | `providers/` 層に分離 |
+| Standalone AI 実行 | Anthropic Messages API 直接呼び出し | Claude Code Channels |
 
 ---
 
-## 3. workflow-runner CLI 設計
+## Phase 1: SQLite 導入 + adapters/providers 基盤
 
-### コマンド体系
+**目標**: 動作を変えずにストレージを SQLite に置換し、`providers/` 層を追加する。
 
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `Cargo.toml` | `rusqlite = { version = "0.31", features = ["bundled"] }` 追加 |
+| `src/engine/store.rs` | `load_state` / `save_state` / `clear_state` の内部を SQLite に書き換え。`load_state_by_id(cwd, session_id)` / `clear_state_by_id` を追加 |
+| `src/main.rs` | `--workflow-id Option<String>` グローバルフラグ追加。各 cmd に `workflow_id` を伝搬。`append_checklist` 関数を削除。`cmd_hook` で stdin JSON から `cwd` を自動抽出するコードを追加 |
+| `src/adapters/claude_code/hook_handler.rs` | `handle_post_bash` から `checklist.md` 書き込みを削除。`providers::claude_code::hook_parser` の型を使って JSON パースを分離 |
+| `src/providers/mod.rs` | **新規** |
+| `src/providers/claude_code/mod.rs` | **新規** |
+| `src/providers/claude_code/hook_parser.rs` | **新規**。各フックイベントの型安全な構造体を定義 |
+| `.gitignore` | `.workflow/workflow.db` を追加。`.workflow/state.json` / `.workflow/checklist.md` のエントリを削除 |
+
+### SQLite スキーマ
+
+```sql
+-- .workflow/workflow.db
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    workflow_id   TEXT PRIMARY KEY,      -- UUIDv4（start 時に生成、session_id の後継）
+    cwd           TEXT NOT NULL,         -- プロジェクトルート絶対パス
+    workflow      TEXT NOT NULL,         -- ワークフロー slug
+    status        TEXT NOT NULL DEFAULT 'active',  -- active | completed
+    started_at    TEXT NOT NULL,         -- RFC3339 UTC
+    completed_at  TEXT                   -- RFC3339 UTC（完了時のみ）
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_cwd_status
+    ON workflow_runs(cwd, status);
+
+CREATE TABLE IF NOT EXISTS step_states (
+    workflow_id    TEXT NOT NULL REFERENCES workflow_runs(workflow_id) ON DELETE CASCADE,
+    step_id        TEXT NOT NULL,        -- "step-id" または "parent/sub"
+    status         TEXT NOT NULL DEFAULT 'pending',
+    gate_recorded  INTEGER NOT NULL DEFAULT 0,
+    started_at     TEXT,
+    completed_at   TEXT,
+    PRIMARY KEY (workflow_id, step_id)
+);
+
+CREATE TABLE IF NOT EXISTS action_reports (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id    TEXT NOT NULL REFERENCES workflow_runs(workflow_id) ON DELETE CASCADE,
+    step_id        TEXT NOT NULL,
+    action_index   INTEGER NOT NULL,
+    action_type    TEXT NOT NULL,
+    exit_code      INTEGER,
+    stdout         TEXT,
+    recorded_at    TEXT NOT NULL
+);
 ```
-workflow-runner [--adapter <name>] <command> [options]
 
-コマンド:
-  start <workflow>       ワークフローを開始し、最初のアクション群を JSON で返す
-  next                   現在の状態から次に実行すべきアクション群を JSON で返す
-  report                 アクションの実行結果を記録する（stdin: JSON）
-  complete <step-id>     ステップ完了を試みる（ゲートチェック付き）
-  resume                 中断ワークフローの再開情報を JSON で返す
-  status                 現在の実行状態を JSON で返す
-  validate               config.yml を検証して結果を返す
-  list                   利用可能なワークフロー一覧を返す
-  hook <event-type>      フックイベントを処理する（stdin: フック JSON、Claude Code 専用）
-```
+### `--workflow-id` の動作仕様
 
-### 入出力プロトコル（JSON）
+- `start` の JSON 出力に `workflow_id` フィールドを追加（`session_id` フィールドは `workflow_id` に改名）
+- `--workflow-id` 省略時: `cwd` で `status='active'` の行が 1 件なら自動選択
+- 複数 active が存在する場合: エラーメッセージで `--workflow-id` の明示を促す
 
-```jsonc
-// workflow-runner start bug-fix の出力例
-{
-  "session_id": "uuid-v4",
-  "workflow": "bug-fix",
-  "status": "started",
-  "actions": [
-    {
-      "step_id": "reproduce",
-      "action_index": 0,
-      "type": "agent",
-      "prompt": "バグを再現し、再現手順を checklist.md に記録してください",
-      "background": false
-    }
-  ],
-  "state_path": ".workflow/state.json"
+### `providers/claude_code/hook_parser.rs` の設計
+
+```rust
+// Claude Code の各フックイベントを型安全な構造体にパース
+
+#[derive(Debug, Deserialize)]
+pub struct PostBashEvent {
+    pub cwd: Option<String>,
+    pub tool_input: BashInput,
+    pub tool_response: BashResponse,
 }
 
-// workflow-runner report の stdin 例
-{
-  "session_id": "uuid-v4",
-  "step_id": "test",
-  "action_index": 0,
-  "type": "run",
-  "exit_code": 0,
-  "stdout": "4 passed, 0 failed",
-  "stderr": ""
+#[derive(Debug, Deserialize)]
+pub struct PreTaskUpdateEvent {
+    pub cwd: Option<String>,
+    pub tool_input: TaskUpdateInput,
 }
 
-// workflow-runner complete test の出力例（ゲート通過）
-{
-  "allowed": true,
-  "next_actions": [...]
+#[derive(Debug, Deserialize)]
+pub struct PostEditEvent {
+    pub cwd: Option<String>,
+    pub tool_input: EditInput,  // file_path フィールドを持つ
 }
 
-// workflow-runner complete test の出力例（ゲート失敗）
-{
-  "allowed": false,
-  "reason": "gate 'test' が未実行です。先に make test を実行してください"
+pub type PreEditEvent = PostEditEvent;
+
+#[derive(Debug, Deserialize)]
+pub struct PreBashEvent {
+    pub cwd: Option<String>,
+    pub tool_input: BashInput,
 }
 ```
+
+### 完了基準
+
+- `cargo test` が全て通過する
+- `workflow-runner start bug-fix` → `workflow-runner --workflow-id <id> next` が SQLite DB で動作する
+- `checklist.md` が生成されない
+- `.workflow/state.json` が生成されない
 
 ---
 
-## 4. 拡張 config.yml スキーマ
+## Phase 2: ワークフロー定義の拡張
 
-### アクション型の追加
+**目標**: `imports`、`pre_commands`/`post_commands`、`allow_files`、`deny`、`guards` を追加し、`Action::Run` と `checklist_key` を廃止する。
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `src/config/types.rs` | `Step` に新フィールド追加。`Action::Run` バリアント削除。`checklist_key` フィールド削除。`Config` に `imports: Vec<String>` 追加 |
+| `src/config/loader.rs` | `imports:` の再帰的解決（循環参照検出付き）。子ワークフローのステップをインライン展開。`Action::Run` が残っている場合はエラー |
+| `src/engine/gate.rs` | `post_commands` を gate 判定の根拠に使うよう更新。`guards` チェックを追加 |
+| `src/engine/executor.rs` | `pre_commands` / `post_commands` を `WorkflowOutput` に含める。`checklist_key` 参照を削除 |
+| `src/protocol/output.rs` | `ResolvedAction::Manual` から `checklist_key` を削除 |
+| `Cargo.toml` | `glob = "0.3"` / `regex = "1"` 追加 |
+| `.workflow/config.yml` | サンプルを新スキーマに更新（`type: run` → `post_commands`、`checklist_key` 削除、`imports:` 例を追加） |
+| `.workflow/workflow.schema.json` | 新フィールドに合わせて更新 |
+
+### 新 Step 型
 
 ```yaml
-# .workflow/config.yml
+# 新しい config.yml 記法
 
+# imports でファイル分割
+imports:
+  - commands/default.yml
+  - workflows/bug-fix.yml
+  - workflows/feature.yml
+
+# .workflow/commands/default.yml
 commands:
   test: make test
   lint: make lint
-  build: make build
-  deploy: make deploy
 
+# .workflow/workflows/bug-fix.yml
 workflows:
-  release:
-    name: リリースフロー
-    description: 設計から本番デプロイまでの完走フロー
+  bug-fix:
+    name: バグ修正フロー
     steps:
-
-      # --- 直列ステップ（agent アクション）---
-      - id: design
+      - id: design                        # checklist_key は廃止。id が一意識別子
         name: 設計確認
-        checklist_key: design
-        actions:
-          - type: agent
-            prompt: "実装方針・影響範囲・インターフェースを整理して checklist.md に記録してください"
+        allow_files:                      # InProgress 中のみ有効（空なら制限なし）
+          - "docs/**"
+          - "/.*\.md$/"                   # / で囲まれた場合は正規表現
+        post_commands:                    # ステップ完了前にゲートとして実行
+          - make docs-check
 
       - id: implement
         name: 実装
+        allow_files:
+          - "src/**"
+          - "tests/**"
+        deny:
+          files:
+            - "docs/specs/**"            # 実装中は仕様書ディレクトリを変更禁止
+          commands:
+            - "git push"                 # Bash ツールでのコマンドを制限
+        guards:
+          - step: design                 # design ステップが完了していること
+            required_files:
+              - "docs/**/*.md"           # design の allow_files に該当するファイルが存在すること
+        pre_commands:                    # ステップ開始時に自動実行
+          - cargo check
+        post_commands:                   # ステップ完了前にゲートとして実行
+          - cargo test
         requires: [design]
         actions:
           - type: agent
             prompt: "設計に従って実装してください"
-
-      # --- 並列ステップ ---
-      - id: quality-check
-        name: 品質チェック（並列）
-        requires: [implement]
-        parallel:
-          - id: run-test
-            actions:
-              - type: run
-                command: "{{commands.test}}"
-                gate: true            # 実行記録が complete の必須条件
-          - id: run-lint
-            actions:
-              - type: run
-                command: "{{commands.lint}}"
-          - id: security
-            actions:
-              - type: skill
-                skill: security-review
-
-      # --- 別ワークフローをネスト呼び出し ---
-      - id: staging
-        name: ステージングデプロイ
-        requires: [quality-check]
-        actions:
-          - type: workflow
-            workflow: deploy
-            inputs:
-              env: staging
-
-      - id: complete
-        name: 完了
-        requires: [design, quality-check, staging]
-        checklist_key: release-summary
 ```
 
-### アクション型の定義
+### パターンマッチの仕様
 
-| type | 動作 | 主要フィールド |
-|------|------|--------------|
-| `run` | シェルコマンド実行 | `command`, `gate: bool` |
-| `agent` | サブエージェント起動 | `prompt`, `background: bool` |
-| `skill` | スキル呼び出し | `skill`, `args: []` |
-| `workflow` | 別ワークフローをネスト実行 | `workflow`, `inputs: {}` |
+- `/pattern/` 形式（スラッシュ区切り）: Rust 正規表現として評価
+- それ以外: `glob` クレートの glob パターンとして評価
+- `allow_files` / `deny.files`: ファイルパスに対して評価（プロジェクトルートからの相対パス）
+- `deny.commands`: 実行コマンド文字列に対して評価（部分一致）
 
-### テンプレート変数
+### 子ワークフローのステップ埋め込み
 
-| 変数 | 解決先 |
-|------|-------|
-| `{{commands.test}}` | `commands.test` の値 |
-| `{{steps.id.output}}` | 指定ステップの実行出力 |
-| `{{inputs.key}}` | ワークフロー呼び出し時の入力値 |
+```yaml
+# 親ワークフローの steps 内でインポート
+steps:
+  - id: prepare
+    name: 準備
+
+  # 子ファイルのステップをここにフラット展開
+  - import: workflows/code-review-steps.yml
+
+  - id: ship
+    name: リリース
+    requires: [review-complete]          # 子ステップの id で参照可能
+```
+
+### Action::Run の廃止移行
+
+- `config/loader.rs` の `load_config` で `actions: [{type: run}]` を検出した場合はロードエラー
+- エラーメッセージ: `"step '<id>': Action::Run は廃止されました。pre_commands / post_commands を使用してください"`
+- `gate: true` の置き換え: `post_commands` に移動（全 post_commands が成功 = gate 通過）
+
+### 完了基準
+
+- `imports:` を使った分割設定が動作する
+- `pre_commands` / `post_commands` が executor 出力に含まれる
+- `Action::Run` を使った設定でわかりやすいエラーが出る
+- `cargo test` が全て通過する
 
 ---
 
-## 5. Rust 実装設計
+## Phase 3: Hook 改善と `init`/`update` コマンド
 
-### ディレクトリ構成
+**目標**: シェルスクリプト Hooks を廃止し、`workflow-runner` が stdin から `cwd` を読む。`init`/`update` で settings.json を自動生成。
 
-```
-aidd-workflow/
-├── PLAN.md
-├── Cargo.toml
-├── Cargo.lock
-├── src/
-│   ├── main.rs                  ← CLI エントリポイント（clap）
-│   │
-│   ├── config/
-│   │   ├── mod.rs
-│   │   ├── types.rs             ← Workflow, Step, Action 等の型定義
-│   │   ├── loader.rs            ← YAML 読み込み・serde_yaml パース
-│   │   └── validator.rs         ← JSON Schema バリデーション（jsonschema クレート）
-│   │
-│   ├── engine/
-│   │   ├── mod.rs
-│   │   ├── dag.rs               ← requires を解析し実行可能ステップを算出
-│   │   ├── state.rs             ← state.json の読み書き・ステップ状態管理
-│   │   ├── executor.rs          ← next_actions の構築・action dispatch ロジック
-│   │   └── gate.rs              ← gate 条件の評価（state を参照）
-│   │
-│   ├── adapters/
-│   │   ├── mod.rs
-│   │   ├── trait.rs             ← AiToolAdapter トレイト定義
-│   │   ├── claude_code/
-│   │   │   ├── mod.rs
-│   │   │   ├── hook_parser.rs   ← Claude Code フック JSON のパース
-│   │   │   └── output.rs        ← gate block 決定・checklist 書き込み
-│   │   └── standalone/
-│   │       ├── mod.rs
-│   │       └── runner.rs        ← AI ツールなしで run アクションを直接実行
-│   │
-│   └── protocol/
-│       ├── mod.rs
-│       ├── input.rs             ← CLI 入力・stdin JSON の型定義
-│       └── output.rs            ← CLI 出力 JSON の型定義（シリアライズ）
-│
-├── .workflow/
-│   ├── config.yml
-│   ├── workflow.schema.json     ← 拡張スキーマ（action 型を追加）
-│   ├── state.json               ← Rust が管理（旧 GATE_ACTIVE は廃止）
-│   └── checklist.md
-│
-└── .claude/
-    ├── skills/
-    │   ├── workflow-orchestrator/
-    │   │   └── SKILL.md         ← 薄いラッパー（workflow-runner を呼ぶだけ）
-    │   └── workflow-create/
-    │       └── SKILL.md
-    └── settings.json            ← フックが workflow-runner hook を呼ぶ
-```
+### 変更ファイル一覧
 
-### 主要クレート
+| ファイル | 変更内容 |
+|---------|---------|
+| `src/main.rs` | `Commands::Init` / `Commands::Update` サブコマンド追加。`cmd_hook` の `cwd` 解決を stdin JSON 読み取りに一本化（`--cwd` フラグは後方互換のため残す） |
+| `src/infra/mod.rs` | **新規** |
+| `src/infra/settings_writer.rs` | **新規**。`write_settings_json(cwd)` と `merge_settings_json(cwd)` を実装 |
+| `src/adapters/claude_code/hook_handler.rs` | `handle_pre_edit()` 追加（allow/deny ファイル制約）。`handle_pre_bash()` 追加（deny コマンド制約）。全ハンドラが `providers::claude_code::hook_parser` の型でパースするよう変更 |
+| `.claude/hooks/post-bash-capture-test.sh` | **削除** |
+| `.claude/hooks/pre-taskupdate-gate.sh` | **削除** |
+| `.claude/hooks/post-edit-validate-config.sh` | **削除** |
+| `.claude/hooks/post-edit-rust-checks.sh` | **維持**（開発補助フックのため） |
+| `.claude/settings.json` | `workflow-runner init` で再生成（シェルスクリプト参照を廃止） |
 
-| クレート | 用途 |
-|---------|------|
-| `clap` | CLI パース |
-| `serde` / `serde_json` / `serde_yaml` | シリアライズ |
-| `jsonschema` | config.yml のスキーマ検証 |
-| `petgraph` | DAG 構築・トポロジカルソート |
-| `uuid` | セッション ID 生成 |
-| `chrono` | タイムスタンプ |
-| `anyhow` | エラーハンドリング |
-
-### AiToolAdapter トレイト
-
-```rust
-pub trait AiToolAdapter {
-    /// アダプター名（"claude-code", "cursor", "standalone" など）
-    fn name(&self) -> &str;
-
-    /// アダプターがサポートする capability
-    fn capabilities(&self) -> Capabilities;
-
-    /// フックイベントを解析して ActionReport を返す
-    fn parse_hook_event(&self, input: &str) -> anyhow::Result<HookEvent>;
-
-    /// gate ブロック時の出力フォーマット
-    fn format_gate_block(&self, reason: &str) -> String;
-
-    /// checklist.md への記録フォーマット
-    fn format_checklist_entry(&self, event: &HookEvent) -> Option<String>;
-}
-
-pub struct Capabilities {
-    pub tasks_api: bool,    // Tasks の作成・更新
-    pub sub_agents: bool,   // background agent 起動
-    pub skills: bool,       // スキル呼び出し
-    pub hooks: bool,        // フック統合
-}
-```
-
----
-
-## 6. 実行モデル（DAG + 並列）
-
-### 実行例：quality-check 並列ステップ
-
-```
-state.json の状態:
-  implement: completed
-  quality-check: in_progress
-    ├── run-test:  pending
-    ├── run-lint:  pending
-    └── security:  pending
-
-workflow-runner next の出力:
-  actions: [
-    { step: "quality-check/run-test",  type: "run",   command: "make test"        },
-    { step: "quality-check/run-lint",  type: "run",   command: "make lint"        },
-    { step: "quality-check/security",  type: "skill", skill: "security-review"    }
-  ]
-  // 3つを同時に実行してよい
-
-// run-test 完了を report
-workflow-runner report < '{"step_id":"quality-check/run-test","exit_code":0,...}'
-
-// run-lint 完了を report  
-workflow-runner report < '{"step_id":"quality-check/run-lint","exit_code":0,...}'
-
-// security 完了を report
-workflow-runner report < '{"step_id":"quality-check/security","exit_code":0,...}'
-
-// 全サブステップ完了 → quality-check を complete
-workflow-runner complete quality-check
-// gate チェック: run-test に gate:true → state に実行記録あり → allowed: true
-```
-
-### DAG 評価アルゴリズム
-
-1. `requires` を辺としてグラフを構築（petgraph の `DiGraph`）
-2. トポロジカルソートで実行順序を決定
-3. 各ステップについて「全 requires が completed か」を評価
-4. 満たしているステップをすべて「実行可能」とし、`next_actions` に含める
-
----
-
-## 7. フック簡素化
-
-Rust がゲートロジックを持つため、フックは単純なシェルスクリプトになる。
-
-### 現行（bash スクリプト、約 50 行）
-
-複雑なインライン Python、GATE_ACTIVE フラグ管理、独自の文字列パース
-
-### 新実装（5 行以下）
+### `init` コマンドの動作
 
 ```bash
-# post-bash.sh
-#!/bin/bash
-cat | workflow-runner --adapter claude-code hook post-bash
-
-# pre-taskupdate.sh
-#!/bin/bash
-RESULT=$(cat | workflow-runner --adapter claude-code hook pre-taskupdate)
-echo "$RESULT"
-# workflow-runner が {"decision":"block",...} を返せばそのまま Claude Code に渡る
+workflow-runner init
+# → .workflow/ ディレクトリを作成
+# → .claude/settings.json を生成
+# → workflow-runner が PATH に存在するか確認し、なければ警告
 ```
+
+生成される `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {"type": "command", "command": "workflow-runner hook post-edit"},
+          {"type": "command", "command": ".claude/hooks/post-edit-rust-checks.sh"}
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {"type": "command", "command": "workflow-runner hook post-edit"},
+          {"type": "command", "command": ".claude/hooks/post-edit-rust-checks.sh"}
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "TaskUpdate",
+        "hooks": [{"type": "command", "command": "workflow-runner hook pre-taskupdate"}]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [{"type": "command", "command": "workflow-runner hook pre-edit"}]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [{"type": "command", "command": "workflow-runner hook pre-edit"}]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "workflow-runner hook pre-bash"}]
+      }
+    ]
+  }
+}
+```
+
+### `update` コマンドの動作
+
+既存の `.claude/settings.json` を読み込み、`workflow-runner` 関連の hook エントリを差分更新する。
+`post-edit-rust-checks.sh` など他のフック設定は保持する。
+
+### `cwd` の stdin 抽出
+
+```rust
+// cmd_hook 内でシェルスクリプトと同等の cwd 抽出を Rust で実装
+fn extract_cwd_from_stdin(stdin_str: &str, fallback: &Path) -> PathBuf {
+    let v: serde_json::Value = serde_json::from_str(stdin_str).unwrap_or_default();
+    v["cwd"].as_str()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+```
+
+hook コマンドは `--cwd` なしで `"command": "workflow-runner hook pre-edit"` として登録可能になる。
+
+### 新フックイベントの動作
+
+| フック | 判定内容 | 返却値 |
+|--------|---------|--------|
+| `pre-edit` | InProgress ステップの `allow_files` / `deny.files` をチェック | `{"decision":"block","reason":"..."}` または `{"decision":"ask","reason":"..."}` |
+| `pre-bash` | InProgress ステップの `deny.commands` をチェック | `{"decision":"block","reason":"..."}` |
+| `pre-taskupdate` | InProgress ステップの gate 未実行チェック（既存） | `{"decision":"block","reason":"..."}` |
+| `post-edit` | `config.yml` 編集後のスキーマ検証（既存） | 警告文字列または空 |
+
+### 完了基準
+
+- `workflow-runner init` で `settings.json` が正しく生成される
+- `workflow-runner update` が既存 `settings.json` を壊さずにマージできる
+- シェルスクリプトなしで `workflow-runner hook pre-edit` が stdin JSON から動作する
+- `allow_files` 違反で `{"decision":"block"}` が返る
+- `cargo test` が全て通過する
 
 ---
 
-## 8. SKILL.md の簡素化
+## Phase 4: Standalone モード → Claude Code Channels
 
-Rust バイナリが判断ロジックを持つため、スキルは「ツールブリッジ」になる。
+**目標**: Anthropic API 直接呼び出しを廃止し、Claude Code Channels に移行する。
 
-```markdown
-# Workflow Orchestrator スキル（v2）
+**前提**: https://code.claude.com/docs/en/channels の仕様を実装開始前に精読して設計を確定する。
 
-## 実行手順
+### 変更ファイル一覧
 
-1. `workflow-runner start <workflow>` を Bash で実行（引数なし時は `workflow-runner resume` または `workflow-runner list`）
-2. JSON の `actions` 配列を順に処理する：
-   - `type: run`      → Bash ツールで `command` を実行
-   - `type: agent`    → Agent ツールで `prompt` を実行（`background: true` なら並列）
-   - `type: skill`    → Skill ツールで `skill` を呼び出す
-   - `type: workflow` → `workflow-runner start <workflow>` を再帰的に実行
-3. 各アクション完了後、`workflow-runner report` に結果を stdin で渡す
-4. `type: run` かつ `gate: true` のアクションは必ず報告する（フックが自動記録）
-5. ステップの全アクション完了後、`workflow-runner complete <step-id>` を実行
-6. `allowed: false` が返ったらユーザーに `reason` を伝えてブロック
-7. `actions` が空になるまで繰り返す
-```
+| ファイル | 変更内容 |
+|---------|---------|
+| `src/adapters/standalone/runner.rs` | `call_anthropic_api` 削除。`run_command` は維持 |
+| `src/adapters/standalone/channels.rs` | **新規**。`providers::channels` を介して Claude Code Channels API を呼び出す |
+| `src/providers/channels/mod.rs` | **新規**。Channels API クライアント実装 |
+| `src/main.rs` | `cmd_exec_step` の `Action::Agent` ブランチを channels 実装に差し替え |
+| `Cargo.toml` | `reqwest` 削除（Channels が HTTP 以外の IPC の場合）または feature-gated 化 |
+| `ARCHITECTURE.md` | standalone → Channels 対応の記述を更新 |
+| `README.md` | `ANTHROPIC_API_KEY` 依存の記述を削除 |
 
----
+### Channels 移行の設計方針
 
-## 9. アダプター拡張ロードマップ
+- standalone アダプターが Claude Code のセッション外からワークフローを制御する外部コントローラーになる
+- `ANTHROPIC_API_KEY` 不要
+- `exec-step <step-id>` コマンドが Channels API 経由でエージェントアクションを実行する
+- Channels API がどのプロトコル（HTTP/IPC/stdio）を使うかによって `providers/channels/` の実装が変わる
 
-| フェーズ | アダプター | 概要 |
-|---------|-----------|------|
-| Phase 1 | `claude-code` | 現行の Hooks + Tasks API + Skills を Rust で再実装 |
-| Phase 2 | `standalone` | AI ツールなし。`run` アクションを直接実行。`agent` は Anthropic API 呼び出し |
-| Phase 3 | `cursor` | Cursor の拡張機構に対応（フック形式が異なる） |
-| Phase 4 | `generic` | OpenAPI スキーマで任意の AI ツールに対応するアダプター設定ファイル方式 |
+### 完了基準
 
----
-
-## 10. フェーズ別実装計画
-
-### Phase 1：Rust コア（Claude Code ターゲット）
-
-- [x] `Cargo.toml` 作成・クレート依存定義
-- [x] `config/types.rs`：Workflow, Step, Action の型定義（serde）
-- [x] `config/loader.rs`：YAML 読み込み・スキーマ検証
-- [x] `engine/state.rs`：state.json の読み書き
-- [x] `engine/dag.rs`：depends 解析・実行可能ステップ算出
-- [x] `engine/gate.rs`：gate 条件チェック
-- [x] `engine/executor.rs`：next_actions 構築
-- [x] `adapters/claude_code/`：フック JSON パース・出力フォーマット
-- [x] `main.rs`：CLI（start / next / report / complete / hook / validate / list）
-- [x] `workflow.schema.json` 拡張：action 型・parallel ブロック追加
-- [x] `.claude/hooks/` 簡素化（workflow-runner 呼び出しのみ）
-- [x] `.claude/skills/workflow-orchestrator/SKILL.md` v2 改訂
-
-### Phase 2：並列実行
-
-- [x] `engine/dag.rs` 拡張：parallel ブロックのサブグラフ評価
-- [x] `protocol/output.rs`：並列アクション群の出力形式
-- [x] SKILL.md：`background: true` アクションの並列実行手順追加
-
-### Phase 3：standalone アダプター
-
-- [x] `adapters/standalone/runner.rs`：`run` アクションを直接 `std::process::Command` で実行
-- [x] `agent` アクション：Anthropic API 呼び出し（`reqwest` + blocking）
-- [x] `exec-step <step-id>` CLI サブコマンド：run/agent アクションを自律実行し report + complete を自動処理
-
-### Phase 4：スキーマ・CLI 安定化
-
-- [x] `workflow-runner validate --format text` でスキーマエラーを人間可読なメッセージで一括表示
-- [x] `workflow-runner status --format table` でターミナルテーブル表示（comfy-table）
-- [x] バイナリ配布（`install.sh` + `.github/workflows/release.yml`、4ターゲット）
+- `ANTHROPIC_API_KEY` なしで `exec-step` が動作する
+- Channels 経由でエージェントアクションが実行される
+- `reqwest` 依存が除去される（または feature-gated になる）
+- `cargo test` が全て通過する
 
 ---
 
-## 11. 移行戦略
-
-現行の bash ベース設計から段階的に移行できる。
+## 依存関係グラフ
 
 ```
-現行                              移行後
-────────────────────────────────────────────────────
-post-bash-capture-test.sh     →  workflow-runner hook post-bash
-pre-taskupdate-gate.sh        →  workflow-runner hook pre-taskupdate
-post-edit-validate-config.sh  →  workflow-runner hook post-edit
-GATE_ACTIVE フラグ            →  state.json の gate_recorded フィールド
-checklist.md 手動記録         →  workflow-runner report が自動追記
-SKILL.md（複雑な手順）        →  SKILL.md（action type dispatch のみ）
+Phase 1（SQLite + providers）
+    ↓ 必須
+Phase 2（ワークフロー定義拡張）
+    ↓ 必須
+Phase 3（Hook 改善）
+    ↓ 独立可（Phase 1 完了後に着手可能）
+Phase 4（Claude Code Channels）
 ```
 
-Phase 1 完了後、bash フックをそのまま残しつつ内部を `workflow-runner` 呼び出しに差し替えることで、Claude Code 側の設定変更なしに移行できる。
+Phase 4 は Phase 1 完了後に他フェーズと並行して設計着手できるが、Phase 3 の hook 設計が固まってから実装するのが望ましい。
+
+---
+
+## 廃止されるファイル・フィールド
+
+| 廃止対象 | 理由 | 代替 |
+|---------|------|------|
+| `.workflow/state.json` | SQLite に移行 | `.workflow/workflow.db` |
+| `.workflow/checklist.md` | SQLite に移行 | `action_reports` テーブル |
+| `Step.checklist_key` | `id` で代替可能 | `Step.id` |
+| `Action::Run { gate }` | `pre_commands` / `post_commands` に分離 | `Step.post_commands` |
+| `.claude/hooks/post-bash-capture-test.sh` | 直接コマンドに移行 | `workflow-runner hook post-bash`（廃止） |
+| `.claude/hooks/pre-taskupdate-gate.sh` | 直接コマンドに移行 | `workflow-runner hook pre-taskupdate` |
+| `.claude/hooks/post-edit-validate-config.sh` | 直接コマンドに移行 | `workflow-runner hook post-edit` |
+| `call_anthropic_api()` | Claude Code Channels に移行 | `providers::channels` |

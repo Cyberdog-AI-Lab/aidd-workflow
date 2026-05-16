@@ -8,10 +8,13 @@
 
 | 問題 | 解決方法 |
 |------|---------|
-| Claude がテストを飛ばして完了と報告する | `gate: true` アクション + ゲートチェック（Rust）|
+| Claude がテストを飛ばして完了と報告する | `post_commands` のゲートチェック（Rust）|
 | ステップの内容を毎回 Claude が解釈する（非決定論） | `actions` フィールドで実行内容を宣言的に記述 |
-| セッションをまたいで作業が中断する | `state.json` でステップ状態を永続化 |
-| AI ツール固有の API に依存する | アダプター層で AI ツールの差異を吸収 |
+| セッションをまたいで作業が中断する | SQLite でステップ状態を永続化 |
+| AI ツール固有の API に依存する | `providers/` 層で差異を吸収し `adapters/` は抽象化 |
+| 複数ワークフローを同時進行できない | SQLite + `--workflow-id` で並行管理 |
+| 設計フェーズを飛ばして実装が始まる | ステップ単位の `guards`（前提ファイル存在チェック） |
+| 対象外のファイルを誤って編集する | ステップ単位の `allow_files` / `deny` 制約 |
 | 独立したステップが直列待ちになる | `parallel` ブロックで複数サブステップを同時返却 |
 
 ### 設計原則
@@ -32,24 +35,35 @@
               │  CLI 呼び出し（JSON 入出力）
 ┌─────────────▼────────────────────────────────────────────┐
 │            workflow-runner（Rust バイナリ）                │
-│  ┌──────────────┐ ┌───────────────┐ ┌──────────────────┐ │
-│  │  config 層   │ │  engine 層    │ │  adapters 層     │ │
-│  │  YAML パース │ │  DAG 評価     │ │  claude-code     │ │
-│  │  型安全な定義│ │  状態管理     │ │  (将来) cursor   │ │
-│  │  バリデーション│ │  ゲートチェック│ │  standalone      │ │
-│  └──────────────┘ └───────────────┘ └──────────────────┘ │
+│                                                          │
+│  ┌──────────┐ ┌───────────┐ ┌──────────┐ ┌───────────┐  │
+│  │ config 層 │ │ engine 層 │ │adapters層│ │providers層│  │
+│  │ YAML パース│ │ DAG 評価  │ │AI非依存の│ │AI固有JSON │  │
+│  │ imports  │ │ 状態管理  │ │抽象インタ│ │パース実装 │  │
+│  │ 型定義   │ │ gate/guard│ │フェース  │ │           │  │
+│  └──────────┘ └───────────┘ └──────────┘ └───────────┘  │
 └─────────────┬────────────────────────────────────────────┘
               │  ファイル I/O
 ┌─────────────▼────────────────────────────────────────────┐
-│                   状態層（ファイル）                        │
-│  .workflow/config.yml      .workflow/state.json           │
-│  .workflow/checklist.md    .workflow/workflow.schema.json │
+│                   状態層（SQLite）                         │
+│  .workflow/config.yml       .workflow/workflow.db         │
+│  .workflow/commands/        .workflow/workflow.schema.json│
+│  .workflow/workflows/                                     │
 └──────────────────────────────────────────────────────────┘
+```
+
+**依存方向**（一方向のみ）:
+```
+main.rs
+  └── engine/*     → config/* のみ
+  └── adapters/*   → providers/* + engine/* + config/*
+  └── providers/*  → config/* のみ（AI 固有知識はここで封じ込め）
+  └── infra/*      → engine/* + config/*（SQLite, settings.json 書き込み）
 ```
 
 ---
 
-## ディレクトリ構成
+## ディレクトリ構成（v5 目標）
 
 ```
 aidd-workflow/
@@ -58,329 +72,288 @@ aidd-workflow/
 │   ├── main.rs                          CLI エントリポイント（clap）
 │   ├── config/
 │   │   ├── types.rs                     Config / Workflow / Step / SubStep / Action 型定義（Pure）
-│   │   └── loader.rs                    YAML ロード + バリデーション / ValidationError（Shell）
+│   │   └── loader.rs                    YAML ロード・imports 解決・バリデーション（Shell）
 │   ├── engine/
 │   │   ├── state.rs                     WorkflowState 型定義・純粋メソッド（Pure）
-│   │   ├── store.rs                     state.json 読み書き（Shell）
+│   │   ├── store.rs                     SQLite 読み書き・WorkflowStore trait（Shell）
 │   │   ├── dag.rs                       requires 依存グラフ評価・サブステップ DAG（Pure）
-│   │   ├── gate.rs                      gate 条件チェック（Pure）
-│   │   └── executor.rs                  next_actions の構築・parallel フラグ付与（Pure）
+│   │   ├── gate.rs                      gate 条件 + guards チェック（Pure）
+│   │   └── executor.rs                  next_actions の構築・pre/post_commands 付与（Pure）
 │   ├── adapters/
 │   │   ├── claude_code/
-│   │   │   └── hook_handler.rs          Claude Code フック処理（Shell）
+│   │   │   └── hook_handler.rs          Claude Code フック処理（providers 経由・Shell）
 │   │   └── standalone/
-│   │       └── runner.rs                run_command / call_anthropic_api（Shell）
+│   │       ├── runner.rs                run_command（Shell）
+│   │       └── channels.rs             Claude Code Channels クライアント（Phase 4）
+│   ├── providers/
+│   │   └── claude_code/
+│   │       └── hook_parser.rs           Claude Code hook JSON → 型安全な構造体（Pure）
+│   ├── infra/
+│   │   └── settings_writer.rs           .claude/settings.json の生成・更新（Shell）
 │   └── protocol/
 │       ├── input.rs                     report コマンドの stdin 型（Pure）
 │       └── output.rs                    JSON 出力型・テーブルフォーマッター（Pure）
-├── .github/
-│   └── workflows/
-│       └── release.yml                  GitHub Actions リリースパイプライン（4ターゲット）
 ├── .workflow/
 │   ├── config.yml                       ワークフロー定義（ユーザーが編集）
-│   ├── workflow.schema.json             JSON Schema（拡張済み）
-│   ├── state.json                       実行状態（自動生成、gitignore）
-│   └── checklist.md                     作業記録（自動生成、gitignore）
+│   ├── commands/                        コマンド定義（imports で読み込む）
+│   │   └── default.yml
+│   ├── workflows/                       ワークフロー定義（imports で読み込む）
+│   │   ├── bug-fix.yml
+│   │   └── feature.yml
+│   ├── workflow.db                      実行状態 SQLite（自動生成、gitignore）
+│   └── workflow.schema.json             JSON Schema
 └── .claude/
     ├── hooks/
-    │   ├── post-bash-capture-test.sh    テスト実行を検出して state.json を更新
-    │   ├── pre-taskupdate-gate.sh       TaskUpdate 前に gate 未実行をブロック
-    │   ├── post-edit-validate-config.sh config.yml 編集後にスキーマ検証
     │   └── post-edit-rust-checks.sh     .rs 編集後に fmt / lint / test を自動実行
     └── skills/workflow-orchestrator/    workflow-runner を呼ぶ薄いブリッジ
 ```
 
 ---
 
-## config.yml スキーマ
+## config.yml スキーマ（v5）
 
-### 基本構造
+### imports
 
 ```yaml
-commands:                          # コマンドエイリアス（{{commands.test}} で参照可）
+# .workflow/config.yml（メインファイル）
+imports:
+  - commands/default.yml     # コマンド定義ファイル
+  - workflows/bug-fix.yml    # ワークフロー定義ファイル
+  - workflows/feature.yml
+
+# インライン定義と imports はマージされる（インラインが優先）
+commands:
+  extra: make extra
+```
+
+```yaml
+# .workflow/commands/default.yml
+commands:
   test: make test
   lint: make lint
+  build: make build
+```
 
+- `imports` のパスはメイン config.yml と同じディレクトリからの相対パス
+- 再帰的なインポートを許容する（循環参照は検出してエラー）
+- `commands` は同一キーがある場合、インライン定義が優先される
+- `workflows` は同一 slug がある場合エラー
+
+### ステップの基本構造（v5）
+
+```yaml
 workflows:
   <slug>:
     name: ワークフロー名
+    description: 説明（任意）
     steps:
-      - id: <step-id>
+      - id: <step-id>             # 一意なステップ ID（checklist_key の代替）
         name: ステップ名
         description: 説明
-        requires: [<step-id>, ...]   # 依存ステップ（DAG の辺）
-        checklist_key: <key>         # 手動記録を促すキー
-        actions: [...]               # または parallel: [...] （両立不可）
+
+        # --- 実行制御 ---
+        pre_commands:             # ステップ開始時に自動実行
+          - make check
+        post_commands:            # ステップ完了前にゲートとして実行
+          - make test             # 失敗するとステップを完了できない
+        actions:                  # Agent / Skill のみ（type: run は廃止）
+          - type: agent
+            prompt: "..."
+          - type: skill
+            skill: security-review
+
+        # --- 依存と前提条件 ---
+        requires: [<step-id>, ...] # 依存ステップ（DAG の辺）
+        guards:                    # 前ステップの成果物チェック
+          - step: design           # このステップが完了していること
+            required_files:        # かつ以下のファイルが存在すること
+              - "docs/specs/*.md"
+
+        # --- アクセス制御（InProgress 中のみ有効）---
+        allow_files:              # 編集を許可するファイルパターン（空なら制限なし）
+          - "src/**"
+          - "/tests\/.*\.rs$/"   # / で囲まれた場合は正規表現
+        deny:
+          files:                  # 編集を禁止するファイルパターン
+            - "/\.env/"
+          commands:               # 実行を禁止するコマンドパターン
+            - "git push"
 ```
 
-### アクション型
+### アクション型（v5）
 
 | `type` | フィールド | 説明 |
 |--------|-----------|------|
-| `run` | `command`, `gate: bool` | シェルコマンド実行。`gate: true` で実行記録が complete の前提条件になる |
 | `agent` | `prompt`, `background: bool` | サブエージェント起動。`background: true` で並列実行可 |
 | `skill` | `skill`, `args: []` | スキル呼び出し |
-| `workflow` | `workflow`, `inputs: {}` | 別ワークフローをネスト実行 |
 
-### ステップの3形態
+> **廃止**: `type: run` は `pre_commands` / `post_commands` に移行。`type: workflow` は `imports:` での子ワークフロー埋め込みに移行。
+
+### ステップの形態
 
 ```yaml
-# 1. 自動ステップ（actions あり）
+# 1. 自動ステップ（post_commands でゲート）
 - id: test
-  actions:
-    - type: run
-      command: "{{commands.test}}"
-      gate: true
+  post_commands:
+    - "{{commands.test}}"
 
 # 2. 並列ステップ（parallel ブロック）
-#    各サブステップは requires で並列ブロック内の依存を表現できる
 - id: quality-check
   parallel:
     - id: run-test
-      actions: [{ type: run, command: make test, gate: true }]
+      post_commands:
+        - make test
     - id: run-lint
-      actions: [{ type: run, command: make lint }]
-      requires: [run-test]          # サブステップ間の依存（省略可）
+      post_commands:
+        - make lint
+      requires: [run-test]
 
 # 3. 手動ステップ（actions も parallel もなし）
 - id: design
   description: 実装方針を整理して記録する
-  checklist_key: design
+  allow_files:
+    - "docs/**"
+
+# 4. 子ワークフローのステップ埋め込み
+- import: workflows/code-review-steps.yml
 ```
 
 ---
 
-## CLI プロトコル
+## CLI プロトコル（v5）
 
 ### コマンド一覧
 
 ```
-workflow-runner [--adapter <name>] [--cwd <path>] <command>
+workflow-runner [--workflow-id <id>] [--cwd <path>] <command>
 
-start <workflow>        ワークフロー開始 → 最初の actions を JSON で返す（status: "started"）
-next                   次の actions を JSON で返す
-report                 アクション実行結果を記録（stdin: JSON）
-complete <step-id>     ステップ完了（ゲートチェック付き）→ 次の actions を返す
-resume                 中断ワークフローの再開情報を返す
-status [--format json|table]   現在の実行状態を返す（--format table でターミナルテーブル）
-validate [--format json|text]  config.yml を検証する（--format text で人間可読出力）
-list                   ワークフロー一覧を返す
-hook <event-type>      Claude Code フックイベントを処理（stdin: hook JSON）
-exec-step <step-id>    ステップの run/agent アクションを直接実行（standalone 専用）
+start <workflow>          ワークフロー開始 → 最初の actions を JSON で返す
+                          出力の workflow_id を以降の --workflow-id に使用する
+next                      次の actions を JSON で返す
+report                    アクション実行結果を記録（stdin: JSON）
+complete <step-id>        ステップ完了（ゲートチェック付き）→ 次の actions を返す
+resume                    中断ワークフローの再開情報を返す
+status [--format json|table]   現在の実行状態を返す
+validate [--format json|text]  config.yml を検証する
+list                      ワークフロー一覧を返す
+hook <event-type>         Claude Code フックイベントを処理（stdin: hook JSON / cwd 自動抽出）
+exec-step <step-id>       ステップのアクションを直接実行（standalone 専用）
+init                      .claude/settings.json を生成・初期化する
+update                    .claude/settings.json の workflow-runner hook 設定を更新する
 ```
 
-### スキルとの通信フロー
+### `--workflow-id` の動作
+
+```bash
+# 開始時に workflow_id を受け取る
+workflow-runner start bug-fix
+# → { "workflow_id": "4fd261ba-...", "status": "started", "actions": [...] }
+
+# 以降のコマンドに workflow_id を渡す（複数並行時は必須）
+workflow-runner --workflow-id 4fd261ba-... complete reproduce
+
+# 1つしか active がない場合は省略可（自動選択）
+workflow-runner next
+```
+
+### スキルとの通信フロー（v5）
 
 ```
 SKILL.md（Claude Code）                workflow-runner
         │                                      │
-        │── start bug-fix ────────────────────▶│ state.json 作成
-        │◀── { status: "started", actions: [...] } ──│
+        │── start bug-fix ────────────────────▶│ workflow.db 作成
+        │◀── { workflow_id: "...", actions: [...] } │
         │                                      │
-        │── [actions を実行] ──────────────────│
+        │── [pre_commands を実行] ─────────────│  (Bash ツール経由)
         │                                      │
-        │── report ───────────────────────────▶│ state.json 更新
-        │◀── { ok: true } ────────────────────│ gate_recorded = true（gate アクションの場合）
+        │── [actions(agent/skill) を実行] ──────│
         │                                      │
-        │── complete test ────────────────────▶│ gate チェック
-        │◀── { allowed: true, next: {...} } ───│ state.json 更新
+        │── [post_commands を実行] ────────────│  (Bash ツール経由)
         │                                      │
-        │── [繰り返し] ───────────────────────│
+        │── report ───────────────────────────▶│ workflow.db 更新
+        │◀── { ok: true } ────────────────────│ gate_recorded = true
         │                                      │
-        │── complete final-step ─────────────▶│ 全完了 → state.json 削除
-        │◀── { allowed: true,                  │
-        │      next: { status: "completed" } }─│
+        │── complete test ────────────────────▶│ gate / guards チェック
+        │◀── { allowed: true, next: {...} } ───│ workflow.db 更新
 ```
 
-### JSON 出力例
+### Hook イベントの stdin JSON（v5）
 
-**start の出力**（`status: "started"` でワークフロー開始を明示）
+`workflow-runner hook <event>` は `--cwd` フラグなしで stdin JSON から `cwd` を自動抽出する。
 
-```json
-{
-  "session_id": "4fd261ba-...",
-  "workflow": "bug-fix",
-  "status": "started",
-  "actions": [
-    {
-      "step_id": "reproduce",
-      "action_index": 0,
-      "step_name": "再現確認",
-      "parallel": false,
-      "type": "manual",
-      "description": "バグを手元で再現し、再現手順を記録する",
-      "checklist_key": "reproduce"
-    }
-  ]
-}
-```
-
-**並列ブロックの next 出力**（`parallel: true` のアイテムは同時実行可）
-
-```json
-{
-  "session_id": "4fd261ba-...",
-  "workflow": "release",
-  "status": "in_progress",
-  "actions": [
-    {
-      "step_id": "quality-check/run-test",
-      "action_index": 0,
-      "step_name": "テスト実行",
-      "parallel": true,
-      "type": "run",
-      "command": "make test",
-      "gate": true
-    },
-    {
-      "step_id": "quality-check/run-lint",
-      "action_index": 0,
-      "step_name": "Lint",
-      "parallel": true,
-      "type": "run",
-      "command": "make lint",
-      "gate": false
-    }
-  ]
-}
-```
-
-**complete の出力（gate ブロック時）**
-
-```json
-{
-  "step_id": "test",
-  "allowed": false,
-  "reason": "gate チェック失敗: ステップ 'test' の gate アクションが未実行です。先にコマンドを実行してください",
-  "next": null
-}
-```
-
-**complete の出力（通過時）**
-
-```json
-{
-  "step_id": "test",
-  "allowed": true,
-  "reason": null,
-  "next": {
-    "session_id": "4fd261ba-...",
-    "workflow": "bug-fix",
-    "status": "completed",
-    "actions": []
-  }
-}
-```
-
-**validate の出力（JSON デフォルト）**
-
-```json
-{
-  "valid": true,
-  "workflow_count": 3,
-  "commands": ["build", "lint", "test"],
-  "errors": []
-}
-```
-
-エラー時は `errors` 配列に全問題を一括収集する（最初の1件で停止しない）:
-
-```json
-{
-  "valid": false,
-  "workflow_count": 1,
-  "commands": ["lint"],
-  "errors": [
-    "commands.test is not defined in config.yml",
-    "step 'deploy' in workflow 'release': unknown requires 'build'"
-  ]
-}
-```
-
-**validate --format text の出力**（人間可読）
-
-```
-config.yml has 2 error(s):
-  [1] commands.test is not defined in config.yml
-  [2] step 'deploy' in workflow 'release': unknown requires 'build'
-```
-
-**status --format table の出力**
-
-```
-Session : 4fd261ba-...
-Workflow: bug-fix
-Started : 2026-05-15T10:00:00+00:00
-
-┌──────────────────────────────────┐
-│ STEP ID     NAME         STATUS  │
-╞══════════════════════════════════╡
-│ reproduce   再現確認     completed │
-│ identify    原因特定     in_progress │
-│ implement   修正実装     pending  │
-└──────────────────────────────────┘
+```bash
+# settings.json に登録するコマンド（シェルスクリプト不要）
+"command": "workflow-runner hook pre-edit"
+"command": "workflow-runner hook pre-taskupdate"
 ```
 
 ---
 
-## 状態管理（state.json）
+## 状態管理（SQLite）
 
-```json
-{
-  "session_id": "uuid-v4",
-  "workflow": "release",
-  "started_at": "2026-05-14T10:00:00Z",
-  "steps": {
-    "design":    { "status": "completed", ... },
-    "implement": { "status": "completed", ... },
-    "quality-check": {
-      "status": "in_progress",
-      "gate_recorded": false,
-      "action_reports": []
-    },
-    "quality-check/run-test": {
-      "status": "completed",
-      "gate_recorded": true,
-      "action_reports": [
-        { "action_index": 0, "action_type": "run", "exit_code": 0, "stdout": "42 passed" }
-      ]
-    },
-    "quality-check/run-lint": { "status": "pending", ... }
-  }
-}
-```
-
-### 並列ステップのキー命名規則
+### ファイルパス
 
 ```
-通常ステップ      → "step-id"
-並列サブステップ  → "parent-id/sub-id"
-並列親ステップ    → "parent-id"（サブステップから sync_parallel_parent で自動導出）
+.workflow/workflow.db   # SQLite DB（gitignore で除外）
 ```
 
-並列親ステップの `status` は全サブステップの状態から自動導出される。
+### スキーマ
 
-| サブステップの状態 | 親ステップの status |
-|-----------------|------------------|
-| 全て `pending` | `pending` |
-| 1つ以上 `in_progress` または `completed` | `in_progress` |
-| 全て `completed` | `completed` |
+```sql
+CREATE TABLE workflow_runs (
+    workflow_id   TEXT PRIMARY KEY,      -- UUIDv4（start 時に生成）
+    cwd           TEXT NOT NULL,         -- プロジェクトルート絶対パス
+    workflow      TEXT NOT NULL,         -- ワークフロー slug
+    status        TEXT NOT NULL DEFAULT 'active',
+    started_at    TEXT NOT NULL,
+    completed_at  TEXT
+);
+
+CREATE TABLE step_states (
+    workflow_id    TEXT NOT NULL REFERENCES workflow_runs(workflow_id) ON DELETE CASCADE,
+    step_id        TEXT NOT NULL,        -- "step-id" または "parent/sub"
+    status         TEXT NOT NULL DEFAULT 'pending',
+    gate_recorded  INTEGER NOT NULL DEFAULT 0,
+    started_at     TEXT,
+    completed_at   TEXT,
+    PRIMARY KEY (workflow_id, step_id)
+);
+
+CREATE TABLE action_reports (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id    TEXT NOT NULL REFERENCES workflow_runs(workflow_id) ON DELETE CASCADE,
+    step_id        TEXT NOT NULL,
+    action_index   INTEGER NOT NULL,
+    action_type    TEXT NOT NULL,
+    exit_code      INTEGER,
+    stdout         TEXT,
+    recorded_at    TEXT NOT NULL
+);
+```
+
+### 複数ワークフロー並行の識別
+
+| ケース | 動作 |
+|--------|------|
+| `--workflow-id` あり | 指定した workflow_id の状態を操作 |
+| `--workflow-id` なし・active 1件 | 自動選択 |
+| `--workflow-id` なし・active 複数 | エラー（`--workflow-id` の指定を促す） |
+| hook イベント | `cwd` で active を絞り込み（全件チェック） |
 
 ---
 
-## ゲートメカニズム
+## ゲートメカニズム（v5）
 
-`gate: true` を持つ `run` アクションは「実行の証明」を要求する。
+`post_commands` に宣言されたコマンドは「実行の証明」を要求する。
 
 ```
-config.yml に gate: true を宣言
+config.yml に post_commands を宣言
         ↓
-SKILL.md が run アクションを Bash で実行
-        ↓（2経路で記録）
-A: SKILL が workflow-runner report を呼ぶ（主経路）
-B: post-bash フックが workflow-runner hook post-bash を呼ぶ（補助）
+SKILL.md が post_commands を Bash で実行
         ↓
-state.json の gate_recorded = true
+workflow-runner report で記録（stdout / exit_code を SQLite に保存）
+        ↓
+SQLite の gate_recorded = true（exit_code = 0 のみ）
         ↓
 workflow-runner complete <step-id>
         ↓
@@ -389,14 +362,42 @@ gate.rs が gate_recorded を確認 → allowed: true
 ステップ Completed に遷移
 ```
 
-**旧設計との比較**
+---
 
-| 項目 | 旧（bash） | 新（Rust） |
-|------|-----------|-----------|
-| ゲート有効化 | `touch .workflow/GATE_ACTIVE`（手動） | `gate: true` を config で宣言（静的） |
-| 記録チェック | checklist.md の文字列検索 | `state.json.gate_recorded` フラグ |
-| ゲート判定 | シェルスクリプト + インライン Python | `engine/gate.rs`（型安全な Rust） |
-| フック複雑度 | 〜50行のシェルスクリプト | 5行以下（workflow-runner 呼び出しのみ） |
+## ファイル制約と Guards（v5）
+
+### allow_files / deny
+
+InProgress 状態のステップに `allow_files` または `deny.files` が設定されている場合、
+`PreToolUse(Edit/Write)` hook が編集を制御する。
+
+```
+Claude が Edit/Write を実行しようとする
+        ↓
+PreToolUse(Edit/Write) hook 発火
+        ↓
+workflow-runner hook pre-edit（stdin: hook JSON）
+        ↓
+InProgress ステップの allow_files / deny.files を確認
+        ↓
+allow_files に合致しない → {"decision":"block","reason":"..."} を返す
+deny.files に合致する → {"decision":"block","reason":"..."} を返す
+"decision":"ask" → Claude に確認を促す
+問題なし → 何も返さない（編集を許可）
+```
+
+### guards（前提ファイル存在チェック）
+
+```yaml
+guards:
+  - step: design           # design ステップが Completed であること
+    required_files:        # かつ以下のパターンにマッチするファイルが存在すること
+      - "docs/specs/*.md"  # design の allow_files に該当するファイル
+```
+
+- `gate.rs` の `check()` が `requires` 確認後に `guards` を評価する
+- `required_files` は glob パターンでプロジェクトルートからの相対パスで評価
+- 未充足の場合は `allowed: false` と理由を返す
 
 ---
 
@@ -418,36 +419,31 @@ design ──▶ implement ──▶ quality-check ──▶ complete
 - 通常ステップ: `requires` が全て `Completed` になったステップを返す
 - 並列ブロック: 全サブステップを同時に返す（各サブステップの `requires` も評価する）
 
-### 並列ブロック内のサブステップ依存
-
-`SubStep` も `requires` フィールドを持ち、並列ブロック内で逐次的な依存を表現できる。
-
-```yaml
-parallel:
-  - id: build        # requires なし → 即時実行可
-  - id: test
-    requires: [build] # build 完了後に実行可
-```
-
-`executable_items` は並列ブロック内でも `requires` を評価し、満たされたサブステップのみを返す。
-
 ---
 
-## アダプター設計
+## アダプター / プロバイダー設計（v5）
 
-`--adapter` フラグで AI ツール固有の処理を切り替える。
+### 層の責務分担
 
-### 現在の実装: `claude-code`
+| 層 | 責務 | 具体例 |
+|----|------|--------|
+| `providers/claude_code/` | Claude Code 固有の hook JSON を型安全な構造体にパース | `PostBashEvent`, `PreEditEvent` |
+| `adapters/claude_code/` | パース済みイベントを受け取り、engine 層を呼んで `HookResponse` を返す | `handle_pre_edit()` |
+| `adapters/standalone/` | シェルコマンド実行・Channels API 呼び出し | `run_command()`, `channels.rs` |
 
-`hook_handler.rs` が Claude Code の 3 種類のワークフローフックイベントを処理する。
+`adapters/` は `providers/` を使うが、具体的な JSON 形式を知らない。
+`providers/` は `engine/` や `config/` を知らない（純粋な変換のみ）。
+
+### claude-code アダプターのフックイベント処理
 
 | フック | タイミング | 処理内容 |
 |--------|-----------|---------|
-| `post-bash` | Bash ツール実行後 | テストコマンド検出 → checklist.md 追記 + state.json 更新 |
-| `pre-taskupdate` | TaskUpdate 実行前 | in_progress ステップの gate 未実行チェック → ブロック判定 |
+| `pre-edit` | Edit/Write 実行前 | allow_files / deny.files チェック → block / ask |
+| `pre-bash` | Bash 実行前 | deny.commands チェック → block |
+| `pre-taskupdate` | TaskUpdate 実行前 | gate 未実行チェック → block |
 | `post-edit` | Edit/Write 実行後 | config.yml 変更検出 → スキーマ検証警告 |
 
-ワークフローフックはエラーで終了しない（exit 0 固定）。ワークフロー外の操作を干渉しないように設計。
+フックはエラーで終了しない（exit 0 固定）。ワークフロー外の操作を干渉しない設計。
 
 ### 開発者向けフック
 
@@ -465,9 +461,9 @@ make test  (cargo test)
 失敗時: exit 1 → Claude にエラーとして通知
 ```
 
-### `standalone` アダプター
+### standalone アダプター（v5 以降）
 
-AI ツールなしでワークフローを自律実行するアダプター。CI/CD や自動化スクリプトでの利用を想定。
+Claude Code Channels を使ってワークフローを外部から制御するアダプター。
 
 ```bash
 workflow-runner --adapter standalone exec-step <step-id>
@@ -475,78 +471,51 @@ workflow-runner --adapter standalone exec-step <step-id>
 
 | アクション型 | 実行方法 |
 |-------------|---------|
-| `run` | `std::process::Command` でシェルコマンドを直接実行 |
-| `agent` | Anthropic Messages API（reqwest::blocking）呼び出し。`ANTHROPIC_API_KEY` 環境変数が必要。デフォルトモデル: `claude-sonnet-4-6` |
-| `skill` / `workflow` | 未対応（エラーを返す） |
-
-`exec-step` は report と complete を内部で自動実行するため、呼び出し側でのロジックが不要。
-コマンドが非 0 終了した時点でステップを中断し、エラーを返す。
-
-### 将来の拡張
-
-| アダプター | 概要 |
-|-----------|------|
-| `cursor` | Cursor の拡張機構に対応（フックのイベント形式が異なる） |
-| `generic` | 設定ファイルで任意の AI ツールに対応 |
-
-コアエンジン（config / engine / protocol）は AI ツールを知らない。アダプターはフックの入出力変換のみを担う。
+| `run` 相当 | `std::process::Command` でシェルコマンドを直接実行 |
+| `agent` | Claude Code Channels API 経由でエージェントを呼び出す |
 
 ---
 
-## 実装済みクレート
+## クレート一覧（v5 目標）
 
 | クレート | バージョン | 用途 |
 |---------|-----------|------|
 | `clap` | 4 | CLI パース（derive マクロ） |
 | `serde` / `serde_json` / `serde_yaml` | 1 | 設定・状態の JSON/YAML シリアライズ |
 | `anyhow` | 1 | エラーハンドリング |
-| `uuid` | 1 | セッション ID 生成（v4） |
-| `chrono` | 0.4 | タイムスタンプ（UTC/ローカル） |
-| `reqwest` | 0.12 | Anthropic API HTTP クライアント（blocking feature） |
-| `comfy-table` | 7 | `status --format table` のターミナルテーブル描画（Pure、Unicode 対応） |
+| `uuid` | 1 | ワークフロー ID 生成（v4） |
+| `chrono` | 0.4 | タイムスタンプ（UTC） |
+| `rusqlite` | 0.31 | SQLite 状態管理（bundled feature） |
+| `glob` | 0.3 | allow_files / guards のパターンマッチ |
+| `regex` | 1 | `/pattern/` 形式の正規表現マッチ |
+| `comfy-table` | 7 | `status --format table` のターミナルテーブル描画 |
 | `tempfile` | 3 | テスト用一時ディレクトリ（dev-dependency） |
+
+> **廃止予定**: `reqwest`（Anthropic API 直接呼び出しが Claude Code Channels に移行後）
 
 ---
 
-## 実装状況（フェーズ）
+## 実装状況
 
-### Phase 1 — 完了
+### v1〜v4（完了）
 
 - [x] Rust コア（config / engine / protocol）
 - [x] Claude Code アダプター（3種のフック処理）
-- [x] CLI（9コマンド）
+- [x] CLI（10 コマンド）
 - [x] `gate: true` による決定論的なゲート制御
 - [x] `requires` による DAG 依存解決
 - [x] `{{commands.*}}` テンプレート変数解決
 - [x] 並列ステップの状態管理（`parent_id/sub_id` キー）
-- [x] フックの簡素化（bash 50行 → 5行）
-- [x] SKILL.md v2（workflow-runner ブリッジ）
-- [x] JSON Schema 拡張（actions / parallel / action 型）
-- [x] FCIS 準拠（`engine/store.rs` を新設し、Pure Core と Shell を分離）
-- [x] 全ソースファイルにユニットテスト追加
-- [x] ソースコード中の全コメントを英語に統一
-
-### Phase 2 — 完了
-
-- [x] `SubStep.requires`：並列ブロック内のサブステップ依存（DAG サブグラフ評価）
-- [x] `ActionItem.parallel: bool`：並列実行可能なアイテムの明示的なフラグ
-- [x] `build_status` で並列サブステップの個別状態を表示
-- [x] `FlowStatus::Started`：`start` コマンドで開始を明示する status 値
-- [x] SKILL.md v2 更新：`parallel: true` アイテムの並列 dispatch 手順
-- [x] `release` ワークフロー：並列 `quality-check` ブロックのサンプル追加
-- [x] `.rs` 編集後の自動品質チェックフック（fmt / lint / test）
-- [x] 42 ユニットテスト（全パス）
-
-### Phase 3 — 完了
-
-- [x] `standalone` アダプター（`run` を `std::process::Command` で直接実行、`agent` を Anthropic API 呼び出し）
-- [x] `exec-step <step-id>` CLI サブコマンド（report + complete を自動処理）
-- [x] `reqwest` 0.12 (blocking) 追加
-- [x] 46 ユニットテスト（全パス）
-
-### Phase 4 — 完了
-
-- [x] `workflow-runner validate --format text` — スキーマエラーを人間可読なメッセージで一括表示（`ValidationError` で複数エラーを収集）
-- [x] `workflow-runner status --format table` — comfy-table による Unicode 対応ターミナルテーブル表示
-- [x] バイナリ配布（`install.sh` + `.github/workflows/release.yml`、4ターゲット）
+- [x] `standalone` アダプター（`run_command` / `call_anthropic_api`）
+- [x] `exec-step` CLI サブコマンド
+- [x] `validate --format text` / `status --format table`
+- [x] バイナリ配布（`install.sh` + GitHub Actions）
+- [x] FCIS 準拠（Pure core / Shell 分離）
 - [x] 51 ユニットテスト（全パス）
+
+### v5（計画中）→ [PLAN.md](./PLAN.md) を参照
+
+- [ ] **Phase 1**: SQLite 導入 + `providers/` 層追加 + `--workflow-id` 対応
+- [ ] **Phase 2**: `imports:` / `pre_commands` / `post_commands` / `allow_files` / `deny` / `guards` + `Action::Run` 廃止
+- [ ] **Phase 3**: `init`/`update` コマンド + シェルスクリプト Hook 廃止 + `pre-edit`/`pre-bash` hook 追加
+- [ ] **Phase 4**: Claude Code Channels 対応（`standalone` アダプター刷新・`reqwest` 廃止）
