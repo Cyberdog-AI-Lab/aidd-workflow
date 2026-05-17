@@ -1,43 +1,60 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// Root config.yml or any import file for workflow-orchestrator.
+/// All top-level keys are optional in individual files; they are merged before validation.
+#[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Additional YAML files to merge, relative to .workflow/
     #[serde(default)]
     pub imports: Vec<String>,
+    /// Named shell commands. Use `{{commands.<key>}}` in pre/post_commands for interpolation.
     #[serde(default)]
     pub commands: HashMap<String, String>,
     #[serde(default)]
     pub workflows: HashMap<String, Workflow>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Workflow {
     pub name: String,
     pub description: Option<String>,
+    /// Steps to execute. At least one step is required (checked at runtime).
+    #[schemars(schema_with = "non_empty_steps")]
     pub steps: Vec<Step>,
 }
 
 /// One step in a workflow.
 /// Holds either `actions` or `parallel`, never both.
 /// A step with neither is a manual step: Claude works from `description`.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Step {
+    /// Unique step identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`
+    #[schemars(schema_with = "kebab_id")]
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    /// Actions to run automatically. Mutually exclusive with `parallel` (checked at runtime).
     #[serde(default)]
     pub actions: Vec<Action>,
+    /// Sub-steps to run in parallel. Mutually exclusive with `actions` (checked at runtime).
     pub parallel: Option<Vec<SubStep>>,
+    /// IDs of steps that must complete before this step starts (checked at runtime).
     #[serde(default)]
     pub requires: Vec<String>,
-    /// Commands run automatically when the step becomes InProgress.
+    /// Shell commands run automatically when the step becomes InProgress.
+    /// Supports `{{commands.<key>}}` interpolation.
     #[serde(default)]
     pub pre_commands: Vec<String>,
-    /// Commands run as a gate before Complete is allowed.
+    /// Shell commands run as a gate before Complete is allowed.
+    /// Supports `{{commands.<key>}}` interpolation.
     #[serde(default)]
     pub post_commands: Vec<String>,
-    /// File path patterns allowed for edit during this step (glob or /regex/).
+    /// File path patterns permitted for editing while InProgress (glob or /regex/).
     #[serde(default)]
     pub allow_files: Vec<String>,
     /// Explicit deny rules for files and shell commands.
@@ -48,41 +65,49 @@ pub struct Step {
     pub guards: Vec<Guard>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DenyRules {
+    /// File path patterns forbidden from editing (glob or /regex/).
     #[serde(default)]
     pub files: Vec<String>,
+    /// Shell command patterns forbidden from running (substring match).
     #[serde(default)]
     pub commands: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Guard {
-    /// The step that must have completed.
+    /// ID of a step that must have completed (checked at runtime).
     pub step: String,
-    /// Files that must exist (glob or /regex/ patterns).
+    /// Files that must exist before this step can begin (glob or /regex/).
     #[serde(default)]
     pub required_files: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SubStep {
+    /// Unique sub-step identifier within the parallel block. Pattern: `^[a-z][a-z0-9_-]*$`
+    #[schemars(schema_with = "kebab_id")]
     pub id: String,
     pub name: Option<String>,
     pub description: Option<String>,
     #[serde(default)]
     pub actions: Vec<Action>,
-    /// Dependencies on other sub-steps within the same parallel block.
+    /// IDs of other sub-steps within the same parallel block that must complete first
+    /// (checked at runtime).
     #[serde(default)]
     pub requires: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
     Agent {
         prompt: String,
-        /// When true, this action may run in parallel with other actions.
+        /// When true, may run concurrently with other actions in the same step.
         #[serde(default)]
         background: bool,
     },
@@ -96,6 +121,36 @@ pub enum Action {
         #[serde(default)]
         inputs: HashMap<String, String>,
     },
+}
+
+// Custom schema functions for constraints that schemars cannot derive automatically.
+
+fn non_empty_steps(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    use schemars::schema::{ArrayValidation, SchemaObject, SingleOrVec};
+    let item = gen.subschema_for::<Step>();
+    SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::Array.into()),
+        array: Some(Box::new(ArrayValidation {
+            items: Some(SingleOrVec::Single(Box::new(item))),
+            min_items: Some(1),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .into()
+}
+
+fn kebab_id(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    use schemars::schema::{SchemaObject, StringValidation};
+    SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::String.into()),
+        string: Some(Box::new(StringValidation {
+            pattern: Some("^[a-z][a-z0-9_-]*$".to_string()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .into()
 }
 
 #[cfg(test)]
@@ -185,5 +240,44 @@ guards:
 workflows: {}"#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(config.imports.is_empty());
+    }
+
+    #[test]
+    fn config_rejects_unknown_field() {
+        let yaml = r#"unknown_key: value
+workflows: {}"#;
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn step_rejects_unknown_field() {
+        let yaml = r#"id: s1
+name: S1
+unknown_key: value"#;
+        let result: Result<Step, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    /// Verifies that .workflow/workflow.schema.json matches the schema generated from Rust types.
+    /// If this test fails, regenerate with: workflow-runner dump-schema > .workflow/workflow.schema.json
+    #[test]
+    fn schema_file_matches_generated() {
+        let schema = schemars::schema_for!(Config);
+        let generated: serde_json::Value = serde_json::to_value(&schema).unwrap();
+
+        let schema_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".workflow/workflow.schema.json");
+        let on_disk_str = std::fs::read_to_string(&schema_path).unwrap_or_else(|_| {
+            panic!(
+                "schema file not found; generate it with: workflow-runner dump-schema > .workflow/workflow.schema.json"
+            )
+        });
+        let on_disk: serde_json::Value = serde_json::from_str(&on_disk_str).unwrap();
+
+        assert_eq!(
+            generated, on_disk,
+            "schema is stale; regenerate with: workflow-runner dump-schema > .workflow/workflow.schema.json"
+        );
     }
 }

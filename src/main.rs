@@ -85,6 +85,8 @@ enum Commands {
     Init,
     /// Update .claude/settings.json with workflow-runner hooks (preserving existing entries).
     Update,
+    /// Print the JSON Schema for config.yml to stdout.
+    DumpSchema,
 }
 
 fn main() {
@@ -123,6 +125,7 @@ fn run(cmd: Commands, cwd: &Path, adapter: &str, workflow_id: Option<&str>) -> R
         Commands::ExecStep { step_id } => cmd_exec_step(cwd, &step_id, workflow_id),
         Commands::Init => cmd_init(cwd),
         Commands::Update => cmd_update(cwd),
+        Commands::DumpSchema => cmd_dump_schema(),
     }
 }
 
@@ -548,6 +551,11 @@ fn cmd_update(cwd: &Path) -> Result<String> {
         "message": "updated: .claude/settings.json merged with workflow-runner hooks"
     });
     Ok(serde_json::to_string_pretty(&out)?)
+}
+
+fn cmd_dump_schema() -> Result<String> {
+    let schema = schemars::schema_for!(config::types::Config);
+    Ok(serde_json::to_string_pretty(&schema)?)
 }
 
 fn action_type_name(action: &crate::config::types::Action) -> &'static str {

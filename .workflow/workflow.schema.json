@@ -1,180 +1,317 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "workflow-orchestrator config",
-  "description": "Root config.yml or any import file. All top-level keys are optional in individual files. The fully merged config must define commands.test.",
+  "title": "Config",
+  "description": "Root config.yml or any import file for workflow-orchestrator. All top-level keys are optional in individual files; they are merged before validation.",
   "type": "object",
-  "additionalProperties": false,
   "properties": {
-    "imports": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Additional YAML files to merge, relative to .workflow/"
-    },
     "commands": {
+      "description": "Named shell commands. Use `{{commands.<key>}}` in pre/post_commands for interpolation.",
+      "default": {},
       "type": "object",
-      "description": "Named shell commands. commands.test is required in the merged config.",
-      "properties": {
-        "test":  { "type": "string", "description": "Test command (required in merged config, e.g. make test)" },
-        "lint":  { "type": "string" },
-        "build": { "type": "string" }
-      },
-      "additionalProperties": { "type": "string" }
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "imports": {
+      "description": "Additional YAML files to merge, relative to .workflow/",
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "workflows": {
+      "default": {},
       "type": "object",
-      "additionalProperties": { "$ref": "#/definitions/workflow" }
+      "additionalProperties": {
+        "$ref": "#/definitions/Workflow"
+      }
     }
   },
+  "additionalProperties": false,
   "definitions": {
-    "workflow": {
-      "type": "object",
-      "required": ["name", "steps"],
-      "additionalProperties": false,
-      "properties": {
-        "name":        { "type": "string" },
-        "description": { "type": "string" },
-        "steps": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/definitions/step" }
-        }
-      }
-    },
-    "step": {
-      "type": "object",
-      "required": ["id", "name"],
-      "additionalProperties": false,
-      "properties": {
-        "id":          { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
-        "name":        { "type": "string" },
-        "description": { "type": "string" },
-        "actions": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/action" },
-          "description": "Actions to run automatically. Mutually exclusive with parallel (checked at runtime)."
-        },
-        "parallel": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/sub_step" },
-          "description": "Sub-steps to run in parallel. Mutually exclusive with actions (checked at runtime)."
-        },
-        "requires": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "IDs of steps that must complete before this step starts (checked at runtime)."
-        },
-        "pre_commands": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Shell commands run automatically when the step becomes InProgress. Supports {{commands.<key>}} interpolation."
-        },
-        "post_commands": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Shell commands run as a gate before Complete is allowed. Supports {{commands.<key>}} interpolation."
-        },
-        "allow_files": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "File path patterns permitted for editing while InProgress (glob or /regex/)."
-        },
-        "deny": { "$ref": "#/definitions/deny_rules" },
-        "guards": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/guard" },
-          "description": "Preconditions that must hold before this step can begin."
-        }
-      }
-    },
-    "sub_step": {
-      "type": "object",
-      "required": ["id"],
-      "additionalProperties": false,
-      "properties": {
-        "id":          { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
-        "name":        { "type": "string" },
-        "description": { "type": "string" },
-        "actions": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/action" }
-        },
-        "requires": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "IDs of other sub-steps within the same parallel block that must complete first (checked at runtime)."
-        }
-      }
-    },
-    "deny_rules": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "files": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "File path patterns forbidden from editing (glob or /regex/)."
-        },
-        "commands": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Shell command patterns forbidden from running (substring match)."
-        }
-      }
-    },
-    "guard": {
-      "type": "object",
-      "required": ["step"],
-      "additionalProperties": false,
-      "properties": {
-        "step": {
-          "type": "string",
-          "description": "ID of a step that must have completed (checked at runtime)."
-        },
-        "required_files": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Files that must exist before this step can begin (glob or /regex/)."
-        }
-      }
-    },
-    "action": {
-      "type": "object",
-      "required": ["type"],
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": ["agent", "skill", "workflow"]
-        }
-      },
+    "Action": {
       "oneOf": [
-        { "$ref": "#/definitions/action_agent" },
-        { "$ref": "#/definitions/action_skill" },
-        { "$ref": "#/definitions/action_workflow" }
+        {
+          "type": "object",
+          "required": [
+            "prompt",
+            "type"
+          ],
+          "properties": {
+            "background": {
+              "description": "When true, may run concurrently with other actions in the same step.",
+              "default": false,
+              "type": "boolean"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "agent"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "skill",
+            "type"
+          ],
+          "properties": {
+            "args": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "skill": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "skill"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "workflow"
+          ],
+          "properties": {
+            "inputs": {
+              "default": {},
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "workflow"
+              ]
+            },
+            "workflow": {
+              "type": "string"
+            }
+          }
+        }
       ]
     },
-    "action_agent": {
+    "DenyRules": {
+      "type": "object",
       "properties": {
-        "type":       { "const": "agent" },
-        "prompt":     { "type": "string" },
-        "background": { "type": "boolean", "description": "When true, may run concurrently with other actions in the same step." }
+        "commands": {
+          "description": "Shell command patterns forbidden from running (substring match).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "files": {
+          "description": "File path patterns forbidden from editing (glob or /regex/).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       },
-      "required": ["type", "prompt"]
+      "additionalProperties": false
     },
-    "action_skill": {
+    "Guard": {
+      "type": "object",
+      "required": [
+        "step"
+      ],
       "properties": {
-        "type":  { "const": "skill" },
-        "skill": { "type": "string" },
-        "args":  { "type": "array", "items": { "type": "string" } }
+        "required_files": {
+          "description": "Files that must exist before this step can begin (glob or /regex/).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "step": {
+          "description": "ID of a step that must have completed (checked at runtime).",
+          "type": "string"
+        }
       },
-      "required": ["type", "skill"]
+      "additionalProperties": false
     },
-    "action_workflow": {
+    "Step": {
+      "description": "One step in a workflow. Holds either `actions` or `parallel`, never both. A step with neither is a manual step: Claude works from `description`.",
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
       "properties": {
-        "type":     { "const": "workflow" },
-        "workflow": { "type": "string" },
-        "inputs":   { "type": "object", "additionalProperties": { "type": "string" } }
+        "actions": {
+          "description": "Actions to run automatically. Mutually exclusive with `parallel` (checked at runtime).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Action"
+          }
+        },
+        "allow_files": {
+          "description": "File path patterns permitted for editing while InProgress (glob or /regex/).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Explicit deny rules for files and shell commands.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DenyRules"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guards": {
+          "description": "Preconditions that must hold before this step can begin.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Guard"
+          }
+        },
+        "id": {
+          "description": "Unique step identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parallel": {
+          "description": "Sub-steps to run in parallel. Mutually exclusive with `actions` (checked at runtime).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/SubStep"
+          }
+        },
+        "post_commands": {
+          "description": "Shell commands run as a gate before Complete is allowed. Supports `{{commands.<key>}}` interpolation.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pre_commands": {
+          "description": "Shell commands run automatically when the step becomes InProgress. Supports `{{commands.<key>}}` interpolation.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requires": {
+          "description": "IDs of steps that must complete before this step starts (checked at runtime).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       },
-      "required": ["type", "workflow"]
+      "additionalProperties": false
+    },
+    "SubStep": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "actions": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Action"
+          }
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique sub-step identifier within the parallel block. Pattern: `^[a-z][a-z0-9_-]*$`",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requires": {
+          "description": "IDs of other sub-steps within the same parallel block that must complete first (checked at runtime).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Workflow": {
+      "type": "object",
+      "required": [
+        "name",
+        "steps"
+      ],
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "steps": {
+          "description": "Steps to execute. At least one step is required (checked at runtime).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Step"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

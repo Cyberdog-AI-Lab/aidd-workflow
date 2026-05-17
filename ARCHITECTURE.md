@@ -735,12 +735,17 @@ validate(&config):  ← マージ後の Config にのみ実行（個別インポ
   └─ 各ステップ: guards.step に未定義ステップが含まれていないか
      → エラーを全件収集して ValidationError として返す
 
-【JSON Schema との役割分担】
-  workflow.schema.json は IDE のオートコンプリート・インラインエラー表示のみに使用する。
+【JSON Schema の生成と整合性】
+  workflow.schema.json は schemars クレートで Rust 型から自動生成する。IDE サポート専用。
   ランタイムでのスキーマ検証は行わない。理由:
-  - serde_yaml が構造的バリデーション（型・列挙値）を担う
+  - serde_yaml + #[serde(deny_unknown_fields)] が構造的バリデーションを担う
   - requires / guards.step の参照整合性は JSON Schema で表現できない（クロスリファレンス）
-  スキーマは「単一 YAML ファイル（ルートまたはインポートファイル）として有効な構造」を記述する。
+
+  スキーマ再生成:
+    workflow-runner dump-schema > .workflow/workflow.schema.json
+
+  schema_file_matches_generated テストが cargo test で整合性を常時検証する。
+  Rust 型を変更したら dump-schema でスキーマを更新してコミットする。
 ```
 
 ---
