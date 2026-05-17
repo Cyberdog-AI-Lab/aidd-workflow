@@ -1,4 +1,4 @@
-# aidd-workflow アーキテクチャ
+# workflow-runner アーキテクチャ
 
 ## 概要
 
@@ -103,7 +103,7 @@ aidd-workflow/
 │   │   ├── bug-fix.yml
 │   │   └── feature.yml
 │   ├── workflow.db                      実行状態 SQLite（自動生成、gitignore）
-│   └── workflow.schema.json             JSON Schema
+│   └── workflow.schema.json             JSON Schema（IDE サポート用。ランタイム検証は validate() が担う）
 └── .claude/
     ├── hooks/
     │   └── post-edit-rust-checks.sh     .rs 編集後に fmt / lint / test を自動実行
@@ -493,4 +493,281 @@ workflow-runner --adapter standalone exec-step <step-id>
 | `comfy-table` | 7 | `status --format table` のターミナルテーブル描画 |
 | `tempfile` | 3 | テスト用一時ディレクトリ（dev-dependency） |
 
-> **廃止済み**: `reqwest`（Anthropic API 直接呼び出しを Claude Code Channels（`claude -p`）に移行）
+---
+
+## コマンド別 実行フロー詳細
+
+### `start <workflow>`
+
+```
+main()
+  └─ cmd_start(cwd, workflow_name)
+      ├─ config::loader::load_config(cwd)
+      │    ├─ load_config_recursive(".workflow/config.yml", visited={})
+      │    │    ├─ YAML をパース → Config
+      │    │    └─ imports を再帰解決（循環検出あり）
+      │    └─ validate(&config)   # commands.test 必須・requires/guards の整合性チェック
+      │
+      ├─ config.workflows.get(workflow_name)   # 未定義なら bail!
+      │
+      ├─ WorkflowState::new(workflow_name, wf)
+      │    ├─ workflow_id = Uuid::new_v4()
+      │    ├─ started_at = Utc::now()
+      │    └─ steps: 全ステップ + 全サブステップ を Pending で初期化
+      │
+      ├─ engine::store::save_state(cwd, &state)   # SQLite へ upsert
+      │
+      ├─ executor::build_next(wf, &state, &config)
+      │    ├─ dag::is_workflow_complete() → false（初回なので false）
+      │    ├─ dag::executable_items(wf, state)
+      │    │    └─ requires が空 かつ Pending なステップを返す
+      │    └─ ActionItem を構築（pre/post_commands・テンプレート解決含む）
+      │
+      └─ JSON 出力: { workflow_id, status: "started", actions: [...] }
+```
+
+### `next` / `resume`
+
+```
+cmd_next(cwd, workflow_id?)
+  ├─ load_config() + resolve_state()   # workflow_id 指定時は load_state_by_id()
+  └─ executor::build_next()  →  JSON 出力（status: in_progress / blocked / completed）
+```
+
+### `report`（stdin: JSON）
+
+```
+cmd_report(cwd, workflow_id?)
+  ├─ read_stdin() → serde_json::from_str::<ReportInput>()
+  ├─ load_config() + resolve_state()
+  │
+  ├─ step.status が Pending なら InProgress に遷移・started_at を記録
+  ├─ step.action_reports に ActionReport を追加
+  │     { action_index, action_type, exit_code, stdout, recorded_at }
+  │
+  ├─ dag::parent_of(step_id) → Some(parent_id) の場合
+  │    └─ state.sync_parallel_parent(parent_id, wf)
+  │         ├─ 全サブステップ Completed → 親を Completed に遷移
+  │         └─ 1つでも Started → 親を InProgress に遷移
+  │
+  ├─ save_state()
+  └─ JSON 出力: { ok: true, step_id }
+```
+
+### `complete <step_id>`
+
+```
+cmd_complete(cwd, step_id, workflow_id?)
+  ├─ load_config() + resolve_state()
+  │
+  ├─ [post_commands ゲート実行]  ← gate_recorded=false の場合のみ
+  │    ├─ step.post_commands を executor::resolve_template() で展開
+  │    ├─ standalone_runner::run_command(cmd, cwd) を順に実行
+  │    │    └─ sh -c <cmd> をサブプロセスで実行・stdout/stderr/exit_code を取得
+  │    ├─ exit_code != 0 → CompleteOutput { allowed: false, reason: "gate failed: ..." }
+  │    └─ 全成功 → step_state.gate_recorded = true に更新
+  │
+  ├─ engine::gate::check(wf, &state, step_id, cwd)
+  │    ├─ step.requires: 依存ステップが全て Completed か確認
+  │    ├─ step.guards:
+  │    │    ├─ 指定ステップが Completed か確認
+  │    │    └─ required_files パターンが cwd 以下に存在するか確認（再帰 walk）
+  │    └─ post_commands がある場合 gate_recorded = true か確認
+  │         → false なら GateResult { allowed: false, reason: "gate check failed" }
+  │
+  ├─ gate NG → CompleteOutput { allowed: false, reason: ... } を返して終了
+  │
+  ├─ step.status = Completed、completed_at = Utc::now() を記録
+  ├─ dag::parent_of(step_id) → Some → sync_parallel_parent()
+  ├─ save_state()
+  │
+  ├─ executor::build_next()  →  next アクションを取得
+  │    └─ dag::is_workflow_complete() = true なら
+  │         └─ store::clear_state_by_id()  # workflow_runs.status = 'completed'
+  │
+  └─ CompleteOutput { allowed: true, next: WorkflowOutput }
+```
+
+### `hook <event_type>`（stdin: hook JSON）
+
+```
+cmd_hook(cwd, event_type, adapter)
+  ├─ read_stdin()
+  ├─ extract_cwd_from_stdin()   # stdin JSON の cwd フィールドを優先使用
+  │
+  ├─ "post-bash"
+  │    └─ handle_post_bash()   → no-op（常に Ok(())）
+  │
+  ├─ "pre-taskupdate"
+  │    ├─ serde_json::from_str::<PreTaskUpdateEvent>()
+  │    ├─ tool_input.status != "completed" → None（スキップ）
+  │    ├─ load_config() + load_state()
+  │    ├─ gate::hook_check_any_blocked(wf, &state)
+  │    │    └─ InProgress かつ gate_recorded=false のステップがあれば Some(reason)
+  │    └─ block → {"decision":"block","reason":"..."} を返す
+  │
+  ├─ "post-edit"
+  │    ├─ serde_json::from_str::<PostEditEvent>()
+  │    ├─ file_path が ".workflow/config.yml" で終わらなければ → None
+  │    └─ load_config() → 失敗なら "[SCHEMA WARNING] ..." を返す
+  │
+  ├─ "pre-edit"
+  │    ├─ serde_json::from_str::<PreEditEvent>()
+  │    ├─ load_config() + load_state()
+  │    ├─ 絶対パス → cwd からの相対パスに変換
+  │    └─ InProgress なステップに対して:
+  │         ├─ allow_files 非空 かつ非マッチ → {"decision":"ask","reason":"..."}
+  │         └─ deny.files にマッチ → {"decision":"block","reason":"..."}
+  │
+  └─ "pre-bash"
+       ├─ serde_json::from_str::<PreBashEvent>()
+       ├─ load_config() + load_state()
+       └─ InProgress なステップの deny.commands と照合
+            └─ 部分一致 or /regex/ マッチ → {"decision":"block","reason":"..."}
+```
+
+### `exec-step <step_id>`（スタンドアロン専用）
+
+```
+cmd_exec_step(cwd, step_id, workflow_id?)
+  ├─ load_config() + resolve_state()
+  │
+  ├─ step.pre_commands を順に実行
+  │    ├─ executor::resolve_template() でテンプレート展開
+  │    ├─ standalone_runner::run_command()
+  │    └─ exit_code != 0 → bail!
+  │
+  ├─ step.actions を順に実行
+  │    ├─ Action::Agent { prompt, .. }
+  │    │    └─ standalone_channels::run_agent(prompt, cwd)
+  │    │         └─ providers::claude_code::channels::run_prompt(prompt, cwd)
+  │    │              └─ Command::new("claude").arg("-p").arg(prompt) を起動
+  │    ├─ Action::Skill  → bail!（スタンドアロン非対応）
+  │    └─ Action::Workflow → bail!（スタンドアロン非対応）
+  │
+  ├─ 各アクション完了後: load_state() → ActionReport 追記 → save_state()
+  └─ cmd_complete(cwd, step_id, Some(&wf_id))   # post_commands ゲート + ゲートチェック
+```
+
+### `init` / `update`
+
+```
+init:
+  ├─ fs::create_dir_all(".workflow/")
+  ├─ which workflow-runner で PATH チェック（警告のみ）
+  └─ infra::settings_writer::write_settings_json(cwd)
+       ├─ build_settings(cwd)
+       │    ├─ post-edit-rust-checks.sh が存在すれば PostToolUse フックに追加
+       │    └─ PreToolUse: TaskUpdate / Edit / Write / Bash
+       │       PostToolUse: Edit / Write
+       └─ .claude/settings.json を新規書き込み
+
+update:
+  └─ infra::settings_writer::merge_settings_json(cwd)
+       ├─ 既存 .claude/settings.json を読み取り（なければ空 JSON）
+       ├─ build_settings() で最新のフック設定を生成
+       ├─ merge_hook_settings(): workflow-runner フックを置換、それ以外は保持
+       └─ .claude/settings.json に書き戻し
+```
+
+---
+
+## DAG 評価の詳細（`engine/dag.rs`）
+
+```rust
+executable_items(wf, state) -> Vec<String>:
+  for step in wf.steps:
+    if step.status is Completed | Failed  → skip
+    if !requires_met(wf, state, step.requires)  → skip
+
+    if step.parallel is Some(subs):
+      for sub in subs:
+        key = "{step.id}/{sub.id}"
+        if sub.status is Pending | InProgress AND sub.requires met:
+          push(key)
+    else:
+      if step.status is Pending | InProgress:
+        push(step.id)
+```
+
+並列ブロックは親ステップのキー（`"parent_id"`）ではなく、子のキー（`"parent_id/sub_id"`）を返します。親ステップのステータスは `sync_parallel_parent()` が各 report / complete 時に自動的に更新します。
+
+---
+
+## ステップのステータス遷移
+
+```
+Pending
+  │  ← report（初回、step_state を InProgress に遷移）
+  ▼
+InProgress
+  │  ← complete → post_commands 実行 → gate::check() 通過
+  ▼
+Completed
+```
+
+並列サブステップ（`parent_id/sub_id`）：
+- 各サブステップが独立して `Pending → InProgress → Completed` を辿る
+- `sync_parallel_parent()` が呼ばれるたびに：
+  - 全サブ Completed → 親を `Completed` に遷移
+  - 1つ以上が Started → 親を `InProgress` に遷移
+
+---
+
+## 設定ローダーの import 解決
+
+```
+load_config(cwd)
+  └─ load_config_recursive(".workflow/config.yml", base=cwd, visited={})
+      ├─ path.canonicalize() で絶対パス取得
+      ├─ visited に追加（重複 = 循環 → bail!）
+      ├─ YAML をパース → Config
+      ├─ config.imports を取り出して mem::take（空に置き換え）
+      ├─ for import_path in imports:
+      │    └─ load_config_recursive(base/.workflow/<import_path>, ...)
+      │         └─ 子 Config を merge_into() でマージ（既存キーは上書きしない）
+      └─ 再帰完了後、トップレベルで validate() を実行
+
+validate(&config):  ← マージ後の Config にのみ実行（個別インポートファイルには実行しない）
+  ├─ commands.test が定義されているか
+  ├─ 各ワークフロー: steps が空でないか
+  ├─ 各ステップ: actions と parallel を同時に持っていないか
+  ├─ 各ステップ: requires に未定義ステップが含まれていないか
+  └─ 各ステップ: guards.step に未定義ステップが含まれていないか
+     → エラーを全件収集して ValidationError として返す
+
+【JSON Schema との役割分担】
+  workflow.schema.json は IDE のオートコンプリート・インラインエラー表示のみに使用する。
+  ランタイムでのスキーマ検証は行わない。理由:
+  - serde_yaml が構造的バリデーション（型・列挙値）を担う
+  - requires / guards.step の参照整合性は JSON Schema で表現できない（クロスリファレンス）
+  - commands.test の必須チェックはマージ後の意味的ルールであり構造スキーマに属さない
+  スキーマは「単一 YAML ファイル（ルートまたはインポートファイル）として有効な構造」を記述し、
+  最終的なマージ後の制約（commands.test 必須）はコメントのみで説明する。
+```
+
+---
+
+## テンプレート解決
+
+`executor::resolve_template(s, config)` が `{{commands.<key>}}` を config.commands の値で置換します。未定義キーはそのまま残します。
+
+```yaml
+commands:
+  test: make test
+
+post_commands:
+  - "{{commands.test}}"   # → "make test" に展開
+  - "{{commands.lint}}"   # → 未定義のため "{{commands.lint}}" のまま
+```
+
+---
+
+## エラーハンドリング方針
+
+| コンテキスト | 方針 |
+|------------|------|
+| 通常コマンド（start / next / complete 等） | `anyhow::Result` でエラーを伝播。`main()` が `ErrorOutput` JSON を stderr に出力し exit code 1 で終了 |
+| フックハンドラ（`cmd_hook`） | エラーでプロセスをクラッシュさせてはならない。JSON パース失敗・設定不在は `None` を返す（ワークフロー外の操作を干渉しない） |
+| `run_command` 失敗（post_commands） | `CompleteOutput { allowed: false, reason }` を返して処理を継続（プロセスは終了しない） |
+| `claude -p` 失敗 | `anyhow::Error` を返して上位でハンドル（exec-step は bail!） |

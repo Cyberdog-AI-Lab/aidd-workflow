@@ -1,23 +1,23 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "workflow-orchestrator config",
+  "description": "Root config.yml or any import file. All top-level keys are optional in individual files. The fully merged config must define commands.test.",
   "type": "object",
-  "required": ["commands", "workflows"],
   "additionalProperties": false,
   "properties": {
     "imports": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "追加でロードする YAML ファイルのパス（.workflow/ 相対）"
+      "description": "Additional YAML files to merge, relative to .workflow/"
     },
     "commands": {
       "type": "object",
+      "description": "Named shell commands. commands.test is required in the merged config.",
       "properties": {
-        "test":  { "type": "string", "description": "テスト実行コマンド（例: make test）" },
+        "test":  { "type": "string", "description": "Test command (required in merged config, e.g. make test)" },
         "lint":  { "type": "string" },
         "build": { "type": "string" }
       },
-      "required": ["test"],
       "additionalProperties": { "type": "string" }
     },
     "workflows": {
@@ -51,38 +51,38 @@
         "actions": {
           "type": "array",
           "items": { "$ref": "#/definitions/action" },
-          "description": "自動実行するアクション一覧（parallel と同時指定不可）"
+          "description": "Actions to run automatically. Mutually exclusive with parallel (checked at runtime)."
         },
         "parallel": {
           "type": "array",
           "items": { "$ref": "#/definitions/sub_step" },
-          "description": "並列実行するサブステップ（actions と同時指定不可）"
+          "description": "Sub-steps to run in parallel. Mutually exclusive with actions (checked at runtime)."
         },
         "requires": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "完了に必要な他ステップの id"
+          "description": "IDs of steps that must complete before this step starts (checked at runtime)."
         },
         "pre_commands": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "ステップ開始時に自動実行するコマンド"
+          "description": "Shell commands run automatically when the step becomes InProgress. Supports {{commands.<key>}} interpolation."
         },
         "post_commands": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "ステップ完了前にゲートとして実行するコマンド"
+          "description": "Shell commands run as a gate before Complete is allowed. Supports {{commands.<key>}} interpolation."
         },
         "allow_files": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "InProgress 中に編集を許可するファイルパターン（glob または /regex/）"
+          "description": "File path patterns permitted for editing while InProgress (glob or /regex/)."
         },
         "deny": { "$ref": "#/definitions/deny_rules" },
         "guards": {
           "type": "array",
           "items": { "$ref": "#/definitions/guard" },
-          "description": "このステップを開始する前に満たすべき条件"
+          "description": "Preconditions that must hold before this step can begin."
         }
       }
     },
@@ -101,7 +101,7 @@
         "requires": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "完了に必要な他サブステップの id（並列ブロック内依存）"
+          "description": "IDs of other sub-steps within the same parallel block that must complete first (checked at runtime)."
         }
       }
     },
@@ -112,12 +112,12 @@
         "files": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "編集を禁止するファイルパターン（glob または /regex/）"
+          "description": "File path patterns forbidden from editing (glob or /regex/)."
         },
         "commands": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "実行を禁止するコマンドパターン（部分一致）"
+          "description": "Shell command patterns forbidden from running (substring match)."
         }
       }
     },
@@ -128,12 +128,12 @@
       "properties": {
         "step": {
           "type": "string",
-          "description": "完了済みである必要があるステップの id"
+          "description": "ID of a step that must have completed (checked at runtime)."
         },
         "required_files": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "存在が必要なファイルパターン（glob または /regex/）"
+          "description": "Files that must exist before this step can begin (glob or /regex/)."
         }
       }
     },
@@ -156,7 +156,7 @@
       "properties": {
         "type":       { "const": "agent" },
         "prompt":     { "type": "string" },
-        "background": { "type": "boolean", "description": "true のとき他のアクションと並列実行してよい" }
+        "background": { "type": "boolean", "description": "When true, may run concurrently with other actions in the same step." }
       },
       "required": ["type", "prompt"]
     },
