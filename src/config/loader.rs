@@ -75,9 +75,6 @@ fn merge_into(base: &mut Config, child: Config) {
 pub fn validate(config: &Config) -> Result<(), ValidationError> {
     let mut errors = Vec::new();
 
-    if !config.commands.contains_key("test") {
-        errors.push("commands.test is not defined in config.yml".to_string());
-    }
     for (slug, wf) in &config.workflows {
         if wf.steps.is_empty() {
             errors.push(format!("workflow '{}' has no steps", slug));
@@ -137,9 +134,6 @@ mod tests {
     use std::collections::HashMap;
 
     fn minimal_config() -> Config {
-        let mut commands = HashMap::new();
-        commands.insert("test".to_string(), "make test".to_string());
-
         let step = Step {
             id: "step1".to_string(),
             name: "Step 1".to_string(),
@@ -164,7 +158,7 @@ mod tests {
         );
         Config {
             imports: vec![],
-            commands,
+            commands: HashMap::new(),
             workflows,
         }
     }
@@ -175,10 +169,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_missing_test_command() {
+    fn validate_accepts_empty_commands() {
         let mut config = minimal_config();
-        config.commands.remove("test");
-        assert!(validate(&config).is_err());
+        config.commands.clear();
+        assert!(validate(&config).is_ok());
     }
 
     #[test]
@@ -226,7 +220,6 @@ mod tests {
     fn validate_collects_multiple_errors() {
         use crate::config::types::{Action, SubStep};
         let mut config = minimal_config();
-        config.commands.remove("test");
         let wf = config.workflows.get_mut("wf").unwrap();
         wf.steps[0].requires.push("missing".to_string());
         wf.steps[0].actions = vec![Action::Agent {
@@ -242,8 +235,8 @@ mod tests {
         }]);
         let err = validate(&config).unwrap_err();
         assert!(
-            err.errors.len() >= 3,
-            "expected at least 3 errors, got {}: {:?}",
+            err.errors.len() >= 2,
+            "expected at least 2 errors, got {}: {:?}",
             err.errors.len(),
             err.errors
         );
@@ -282,8 +275,6 @@ mod tests {
         std::fs::create_dir_all(&workflow_dir).unwrap();
 
         let yaml = r#"
-commands:
-  test: make test
 workflows:
   wf:
     name: WF
@@ -330,8 +321,6 @@ workflows:
             wf_dir.join("config.yml"),
             r#"imports:
   - workflows/extra.yml
-commands:
-  test: make test
 workflows:
   main:
     name: Main
@@ -361,8 +350,6 @@ workflows:
             wf_dir.join("a.yml"),
             r#"imports:
   - b.yml
-commands:
-  test: make test
 workflows: {}"#,
         )
         .unwrap();
@@ -370,7 +357,6 @@ workflows: {}"#,
             wf_dir.join("b.yml"),
             r#"imports:
   - a.yml
-commands: {}
 workflows: {}"#,
         )
         .unwrap();
@@ -378,8 +364,6 @@ workflows: {}"#,
             wf_dir.join("config.yml"),
             r#"imports:
   - a.yml
-commands:
-  test: make test
 workflows:
   wf:
     name: WF

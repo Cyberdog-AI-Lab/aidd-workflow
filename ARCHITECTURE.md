@@ -506,7 +506,7 @@ main()
       │    ├─ load_config_recursive(".workflow/config.yml", visited={})
       │    │    ├─ YAML をパース → Config
       │    │    └─ imports を再帰解決（循環検出あり）
-      │    └─ validate(&config)   # commands.test 必須・requires/guards の整合性チェック
+      │    └─ validate(&config)   # requires/guards の整合性チェック
       │
       ├─ config.workflows.get(workflow_name)   # 未定義なら bail!
       │
@@ -729,7 +729,6 @@ load_config(cwd)
       └─ 再帰完了後、トップレベルで validate() を実行
 
 validate(&config):  ← マージ後の Config にのみ実行（個別インポートファイルには実行しない）
-  ├─ commands.test が定義されているか
   ├─ 各ワークフロー: steps が空でないか
   ├─ 各ステップ: actions と parallel を同時に持っていないか
   ├─ 各ステップ: requires に未定義ステップが含まれていないか
@@ -741,9 +740,7 @@ validate(&config):  ← マージ後の Config にのみ実行（個別インポ
   ランタイムでのスキーマ検証は行わない。理由:
   - serde_yaml が構造的バリデーション（型・列挙値）を担う
   - requires / guards.step の参照整合性は JSON Schema で表現できない（クロスリファレンス）
-  - commands.test の必須チェックはマージ後の意味的ルールであり構造スキーマに属さない
-  スキーマは「単一 YAML ファイル（ルートまたはインポートファイル）として有効な構造」を記述し、
-  最終的なマージ後の制約（commands.test 必須）はコメントのみで説明する。
+  スキーマは「単一 YAML ファイル（ルートまたはインポートファイル）として有効な構造」を記述する。
 ```
 
 ---
