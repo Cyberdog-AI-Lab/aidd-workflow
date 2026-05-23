@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn build_status_includes_agent_sub_tasks() {
-        use crate::config::types::AgentTask;
+        use crate::config::types::SubagentTask;
         let wf = Workflow {
             name: "test".to_string(),
             description: None,
@@ -228,14 +228,14 @@ mod tests {
                 id: "p".to_string(),
                 name: "Parallel".to_string(),
                 agents: Some(vec![
-                    AgentTask {
+                    SubagentTask {
                         id: "a".to_string(),
                         name: Some("A".to_string()),
                         description: None,
                         actions: vec![],
                         requires: vec![],
                     },
-                    AgentTask {
+                    SubagentTask {
                         id: "b".to_string(),
                         name: None,
                         description: None,

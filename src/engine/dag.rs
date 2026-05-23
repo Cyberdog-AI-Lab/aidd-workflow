@@ -80,7 +80,7 @@ pub fn parent_of(task_id: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{AgentTask, Task, Workflow};
+    use crate::config::types::{SubagentTask, Task, Workflow};
     use crate::engine::state::{StepStatus, WorkflowState};
 
     fn make_linear_workflow() -> Workflow {
@@ -111,14 +111,14 @@ mod tests {
                 id: "p".to_string(),
                 name: "Parallel".to_string(),
                 agents: Some(vec![
-                    AgentTask {
+                    SubagentTask {
                         id: "x".to_string(),
                         name: None,
                         description: None,
                         actions: vec![],
                         requires: vec![],
                     },
-                    AgentTask {
+                    SubagentTask {
                         id: "y".to_string(),
                         name: None,
                         description: None,
@@ -195,14 +195,14 @@ mod tests {
                 id: "p".to_string(),
                 name: "Parallel".to_string(),
                 agents: Some(vec![
-                    AgentTask {
+                    SubagentTask {
                         id: "x".to_string(),
                         name: None,
                         description: None,
                         actions: vec![],
                         requires: vec![],
                     },
-                    AgentTask {
+                    SubagentTask {
                         id: "y".to_string(),
                         name: None,
                         description: None,
