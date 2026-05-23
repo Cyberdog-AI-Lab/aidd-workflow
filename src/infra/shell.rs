@@ -6,6 +6,7 @@ pub struct RunResult {
     pub exit_code: i32,
     #[allow(dead_code)]
     pub stdout: String,
+    #[allow(dead_code)]
     pub stderr: String,
 }
 

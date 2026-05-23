@@ -12,12 +12,11 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use adapters::hooks::hook_handler;
-use adapters::standalone::channels as standalone_channels;
-use adapters::standalone::runner as standalone_runner;
 use config::loader::{load_config, validate as validate_config};
 use engine::state::{ActionReport, StepStatus, WorkflowState};
 use engine::store::{clear_state_by_id, load_state, load_state_by_id, save_state};
 use engine::{dag, executor, gate};
+use infra::shell as shell_runner;
 use protocol::{
     input::ReportInput,
     output::{
@@ -32,10 +31,6 @@ use protocol::{
     about = "Workflow execution engine for AI tools"
 )]
 struct Cli {
-    /// Adapter name (claude-code | standalone)
-    #[arg(long, default_value = "claude-code")]
-    adapter: String,
-
     /// Project root directory (defaults to current directory)
     #[arg(long)]
     cwd: Option<PathBuf>,
@@ -79,8 +74,6 @@ enum Commands {
         /// Event type: post-bash | pre-taskupdate | post-edit
         event_type: String,
     },
-    /// Execute a step's actions directly (standalone adapter only).
-    ExecStep { step_id: String },
     /// Initialize .workflow/ directory and generate .claude/settings.json.
     Init,
     /// Update .claude/settings.json with workflow-runner hooks (preserving existing entries).
@@ -93,7 +86,7 @@ fn main() {
     let cli = Cli::parse();
     let cwd = cli.cwd.unwrap_or_else(|| std::env::current_dir().unwrap());
 
-    let result = run(cli.command, &cwd, &cli.adapter, cli.workflow_id.as_deref());
+    let result = run(cli.command, &cwd, cli.workflow_id.as_deref());
     match result {
         Ok(json) => {
             if !json.is_empty() {
@@ -111,7 +104,7 @@ fn main() {
     }
 }
 
-fn run(cmd: Commands, cwd: &Path, adapter: &str, workflow_id: Option<&str>) -> Result<String> {
+fn run(cmd: Commands, cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
     match cmd {
         Commands::Start { workflow } => cmd_start(cwd, &workflow),
         Commands::Next => cmd_next(cwd, workflow_id),
@@ -121,8 +114,7 @@ fn run(cmd: Commands, cwd: &Path, adapter: &str, workflow_id: Option<&str>) -> R
         Commands::Status { format } => cmd_status(cwd, &format, workflow_id),
         Commands::Validate { format } => cmd_validate(cwd, &format),
         Commands::List => cmd_list(cwd),
-        Commands::Hook { event_type } => cmd_hook(cwd, &event_type, adapter),
-        Commands::ExecStep { step_id } => cmd_exec_step(cwd, &step_id, workflow_id),
+        Commands::Hook { event_type } => cmd_hook(cwd, &event_type),
         Commands::Init => cmd_init(cwd),
         Commands::Update => cmd_update(cwd),
         Commands::DumpSchema => cmd_dump_schema(),
@@ -233,7 +225,7 @@ fn cmd_complete(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result<
                     .collect();
 
                 for cmd in &resolved {
-                    let result = standalone_runner::run_command(cmd, cwd)?;
+                    let result = shell_runner::run_command(cmd, cwd)?;
                     if result.exit_code != 0 {
                         let output = CompleteOutput {
                             step_id: step_id.to_string(),
@@ -397,7 +389,7 @@ fn cmd_list(cwd: &Path) -> Result<String> {
     Ok(serde_json::to_string_pretty(&items)?)
 }
 
-fn cmd_hook(cwd: &Path, event_type: &str, _adapter: &str) -> Result<String> {
+fn cmd_hook(cwd: &Path, event_type: &str) -> Result<String> {
     let input = read_stdin().unwrap_or_default();
     let effective_cwd = extract_cwd_from_stdin(&input, cwd);
 
@@ -432,93 +424,6 @@ fn read_stdin() -> Result<String> {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf)?;
     Ok(buf)
-}
-
-fn cmd_exec_step(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result<String> {
-    use crate::config::types::Action;
-
-    let config = load_config(cwd)?;
-    let state = resolve_state(cwd, workflow_id)?.context("no workflow in progress")?;
-    let wf = config
-        .workflows
-        .get(&state.workflow)
-        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
-
-    let step = wf
-        .steps
-        .iter()
-        .find(|s| s.id == step_id)
-        .with_context(|| format!("step '{}' not found in workflow", step_id))?;
-
-    let wf_id = state.workflow_id.clone();
-
-    // Run pre_commands before the step body.
-    for cmd in &step.pre_commands {
-        let resolved = executor::resolve_template(cmd, &config);
-        let result = standalone_runner::run_command(&resolved, cwd)?;
-        eprintln!("{}", result.stderr.trim_end());
-        if result.exit_code != 0 {
-            anyhow::bail!(
-                "pre_commands failed: '{}' exited with code {}",
-                resolved,
-                result.exit_code
-            );
-        }
-    }
-
-    for (idx, action) in step.actions.iter().enumerate() {
-        let (exit_code, stdout, _stderr) = match action {
-            Action::Agent { prompt, .. } => {
-                let result = standalone_channels::run_agent(prompt, cwd)?;
-                println!("{}", result.stdout);
-                (0, result.stdout, String::new())
-            }
-            Action::Skill { skill, .. } => {
-                anyhow::bail!(
-                    "skill action '{}' is not supported in standalone mode",
-                    skill
-                )
-            }
-            Action::Workflow { workflow, .. } => {
-                anyhow::bail!(
-                    "workflow action '{}' is not supported in standalone mode",
-                    workflow
-                )
-            }
-        };
-
-        {
-            use chrono::Utc;
-            use engine::state::{ActionReport, StepStatus};
-            let mut st = resolve_state(cwd, Some(&wf_id))?.context("no workflow in progress")?;
-            {
-                let s = st.steps.entry(step_id.to_string()).or_default();
-                if s.status == StepStatus::Pending {
-                    s.status = StepStatus::InProgress;
-                    s.started_at = Some(Utc::now());
-                }
-                s.action_reports.push(ActionReport {
-                    action_index: idx,
-                    action_type: action_type_name(action).to_string(),
-                    exit_code: Some(exit_code),
-                    stdout: Some(stdout.clone()),
-                    recorded_at: Utc::now(),
-                });
-            }
-            save_state(cwd, &st)?;
-        }
-
-        if exit_code != 0 {
-            anyhow::bail!(
-                "action exited with code {}; aborting step '{}'",
-                exit_code,
-                step_id
-            );
-        }
-    }
-
-    // cmd_complete handles post_commands gate automatically.
-    cmd_complete(cwd, step_id, Some(&wf_id))
 }
 
 fn cmd_init(cwd: &Path) -> Result<String> {
@@ -556,13 +461,4 @@ fn cmd_update(cwd: &Path) -> Result<String> {
 fn cmd_dump_schema() -> Result<String> {
     let schema = schemars::schema_for!(config::types::Config);
     Ok(serde_json::to_string_pretty(&schema)?)
-}
-
-fn action_type_name(action: &crate::config::types::Action) -> &'static str {
-    use crate::config::types::Action;
-    match action {
-        Action::Agent { .. } => "agent",
-        Action::Skill { .. } => "skill",
-        Action::Workflow { .. } => "workflow",
-    }
 }

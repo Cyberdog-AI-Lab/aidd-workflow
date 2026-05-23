@@ -80,17 +80,13 @@ aidd-workflow/
 │   │   ├── gate.rs                      gate 条件 + guards チェック（Pure）
 │   │   └── executor.rs                  next_actions の構築・pre/post_commands 付与（Pure）
 │   ├── adapters/
-│   │   ├── hooks/
-│   │   │   └── hook_handler.rs          Claude Code フック処理（providers 経由・Shell）
-│   │   └── standalone/
-│   │       ├── runner.rs                run_command（Shell）
-│   │       └── channels.rs             Claude Code Channels クライアント（Phase 4）
+│   │   └── hooks/
+│   │       └── hook_handler.rs          Claude Code フック処理（providers 経由・Shell）
 │   ├── providers/
 │   │   └── claude_code/
-│   │       ├── channels/
-│   │       │   └── mod.rs               `claude -p` 経由の Claude Code Channels 呼び出し（Pure）
 │   │       └── hook_parser.rs           Claude Code hook JSON → 型安全な構造体（Pure）
 │   ├── infra/
+│   │   ├── shell.rs                     run_command（sh -c によるシェル実行・Shell）
 │   │   └── settings_writer.rs           .claude/settings.json の生成・更新（Shell）
 │   └── protocol/
 │       ├── input.rs                     report コマンドの stdin 型（Pure）
@@ -239,9 +235,9 @@ status [--format json|table]   現在の実行状態を返す
 validate [--format json|text]  config.yml を検証する
 list                      ワークフロー一覧を返す
 hook <event-type>         Claude Code フックイベントを処理（stdin: hook JSON / cwd 自動抽出）
-exec-step <step-id>       ステップのアクションを直接実行（standalone 専用）
 init                      .claude/settings.json を生成・初期化する
 update                    .claude/settings.json の workflow-runner hook 設定を更新する
+dump-schema               config.yml の JSON Schema を stdout に出力する
 ```
 
 ### `--workflow-id` の動作
@@ -430,9 +426,8 @@ design ──▶ implement ──▶ quality-check ──▶ complete
 | 層 | 責務 | 具体例 |
 |----|------|--------|
 | `providers/claude_code/` | Claude Code 固有の hook JSON を型安全な構造体にパース | `PostBashEvent`, `PreEditEvent` |
-| `providers/claude_code/channels/` | `claude -p` 経由の Claude Code Channels 呼び出し | `run_prompt()` |
 | `adapters/hooks/` | パース済みイベントを受け取り、engine 層を呼んで `HookResponse` を返す | `handle_pre_edit()` |
-| `adapters/standalone/` | シェルコマンド実行・Channels API 呼び出し | `run_command()`, `run_agent()` |
+| `infra/shell` | シェルコマンド実行（`post_commands` ゲートで使用） | `run_command()` |
 
 `adapters/` は `providers/` を使うが、具体的な JSON 形式を知らない。
 `providers/` は `engine/` や `config/` を知らない（純粋な変換のみ）。
@@ -464,17 +459,11 @@ make test  (cargo test)
 失敗時: exit 1 → Claude にエラーとして通知
 ```
 
-### standalone アダプター（v5 以降）
+### 自律駆動型ワークフロー（Phase 5 で再設計予定）
 
-Claude Code Channels を使ってワークフローを外部から制御するアダプター。
-
-```bash
-workflow-runner --adapter standalone exec-step <step-id>
-```
-
-| アクション型 | 実行方法 |
-|-------------|---------|
-| `agent` | `providers::claude_code::channels`（`claude -p`）経由で Claude Code Channels API を呼び出す |
+Claude Code セッション外からワークフローを外部プロセスとして制御する仕組み。
+`start` → `report` → `complete` の CLI プロトコルを外部コントローラーが駆動する。
+詳細は `PLAN.md` の Phase 5 を参照。
 
 ---
 
@@ -624,29 +613,6 @@ cmd_hook(cwd, event_type, adapter)
        ├─ load_config() + load_state()
        └─ InProgress なステップの deny.commands と照合
             └─ 部分一致 or /regex/ マッチ → {"decision":"block","reason":"..."}
-```
-
-### `exec-step <step_id>`（スタンドアロン専用）
-
-```
-cmd_exec_step(cwd, step_id, workflow_id?)
-  ├─ load_config() + resolve_state()
-  │
-  ├─ step.pre_commands を順に実行
-  │    ├─ executor::resolve_template() でテンプレート展開
-  │    ├─ standalone_runner::run_command()
-  │    └─ exit_code != 0 → bail!
-  │
-  ├─ step.actions を順に実行
-  │    ├─ Action::Agent { prompt, .. }
-  │    │    └─ standalone_channels::run_agent(prompt, cwd)
-  │    │         └─ providers::claude_code::channels::run_prompt(prompt, cwd)
-  │    │              └─ Command::new("claude").arg("-p").arg(prompt) を起動
-  │    ├─ Action::Skill  → bail!（スタンドアロン非対応）
-  │    └─ Action::Workflow → bail!（スタンドアロン非対応）
-  │
-  ├─ 各アクション完了後: load_state() → ActionReport 追記 → save_state()
-  └─ cmd_complete(cwd, step_id, Some(&wf_id))   # post_commands ゲート + ゲートチェック
 ```
 
 ### `init` / `update`

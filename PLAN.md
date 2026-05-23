@@ -371,57 +371,102 @@ hook コマンドは `--cwd` なしで `"command": "workflow-runner hook pre-edi
 
 ---
 
-## Phase 4: Standalone モード → Claude Code Channels
+## Phase 4: Standalone モード削除（完了）
 
-**目標**: Anthropic API 直接呼び出しを廃止し、Claude Code Channels に移行する。
+**目標**: 不完全な Standalone モード実装を削除し、コードベースを整理する。
 
-**前提**: https://code.claude.com/docs/en/channels の仕様を実装開始前に精読して設計を確定する。
+**実施内容**:
+- `src/adapters/standalone/` を削除（`runner.rs` / `channels.rs` / `mod.rs`）
+- `src/providers/claude_code/channels/` を削除（`claude -p` 呼び出し）
+- `exec-step` CLI サブコマンドを削除
+- `--adapter` CLI フラグを削除
+- `run_command` を `src/infra/shell.rs` へ移動（`cmd_complete` のゲート実行で継続使用）
+- 自律駆動型ワークフロー実現の設計は **Phase 5** として再計画
 
-### 変更ファイル一覧
+---
 
-| ファイル | 変更内容 |
-|---------|---------|
-| `src/adapters/standalone/runner.rs` | `call_anthropic_api` 削除。`run_command` は維持 |
-| `src/adapters/standalone/channels.rs` | **新規**。`providers::channels` を介して Claude Code Channels API を呼び出す |
-| `src/providers/channels/mod.rs` | **新規**。Channels API クライアント実装 |
-| `src/main.rs` | `cmd_exec_step` の `Action::Agent` ブランチを channels 実装に差し替え |
-| `Cargo.toml` | `reqwest` 削除（Channels が HTTP 以外の IPC の場合）または feature-gated 化 |
-| `ARCHITECTURE.md` | standalone → Channels 対応の記述を更新 |
-| `README.md` | `ANTHROPIC_API_KEY` 依存の記述を削除 |
+## Phase 5: 自律駆動型ワークフロー（外部コントローラー）
 
-### Channels 移行の設計方針
+**目標**: AI ツールのセッション外から `workflow-runner` を外部プロセスとして駆動し、  
+ステップの実行・状態遷移・エラー処理をすべて自律的に行う仕組みを実現する。
 
-- standalone アダプターが Claude Code のセッション外からワークフローを制御する外部コントローラーになる
-- `ANTHROPIC_API_KEY` 不要
-- `exec-step <step-id>` コマンドが Channels API 経由でエージェントアクションを実行する
-- Channels API がどのプロトコル（HTTP/IPC/stdio）を使うかによって `providers/channels/` の実装が変わる
+### 背景・動機
+
+現行の `claude-code` アダプターは Claude Code セッション内の SKILL.md を通じて動作する。  
+これに対し、**外部プロセスからの自律駆動**は以下のユースケースを開きます：
+
+- CI/CD パイプラインからのワークフロー実行（Git push → 自動バグ修正など）
+- スケジューラー・cron からの定期実行
+- 複数の AI ツール（Cursor, Copilot 等）を統一インターフェースで駆動
+- Claude Code セッションを必要としない headless 実行
+
+### コンセプト
+
+```
+外部コントローラープロセス
+        │
+        │── workflow-runner start <workflow> ──────▶ workflow.db
+        │◀── { workflow_id, actions: [...] }
+        │
+        │── [AI エージェント呼び出し] ──────────────▶ AI ツール（任意）
+        │        例: claude -p "..." / Cursor API / etc.
+        │◀── { stdout, exit_code }
+        │
+        │── workflow-runner report ─────────────────▶ workflow.db
+        │── workflow-runner complete <step-id> ──────▶ gate チェック
+        │◀── { allowed: true, next: {...} }
+        │
+        │── [次のアクションへ継続...]
+```
+
+### 設計方針
+
+1. **CLI プロトコルは変更しない** — `start` / `report` / `complete` の JSON I/O をそのまま使用
+2. **AI ツール非依存** — コントローラーがどの AI を呼ぶかは自由（Claude Code / API / その他）
+3. **外部コントローラーバイナリ** — `workflow-runner` とは別の薄いオーケストレーターを用意するか、
+   既存の `exec-step` を再設計して汎用 `Action::Agent` ディスパッチャとして実装する
+4. **認証・設定** — AI ツールへの接続情報は外部コントローラー側で管理（workflow-runner は関知しない）
+
+### 実装候補
+
+| アプローチ | メリット | デメリット |
+|-----------|---------|-----------|
+| A: `exec-step` を汎用ディスパッチャとして再実装 | workflow-runner 単体で完結 | AI ツール固有ロジックが混入しやすい |
+| B: 外部オーケストレータースクリプト（shell / Python） | AI ツール依存を完全分離 | 別リポジトリ・別バイナリが必要 |
+| C: Claude Code SDK を使った Rust バイナリ | 型安全・高速 | SDK の安定性に依存 |
+
+### 検討事項
+
+- どの AI ツール API を使うか（Claude Code SDK / Anthropic Messages API / `claude -p`）
+- エラー・リトライ戦略（ステップ失敗時の動作）
+- ログ・可観測性（外部から実行状況を追跡する方法）
+- 並列ステップのエージェント並列起動
 
 ### 完了基準
 
-- `ANTHROPIC_API_KEY` なしで `exec-step` が動作する
-- Channels 経由でエージェントアクションが実行される
-- `reqwest` 依存が除去される（または feature-gated になる）
+- Claude Code セッション外からワークフローをエンドツーエンドで実行できる
 - `cargo test` が全て通過する
+- ドキュメント（ARCHITECTURE.md / README.md）が更新されている
 
 ---
 
 ## 依存関係グラフ
 
 ```
-Phase 1（SQLite + providers）
+Phase 1（SQLite + providers）      ✅ 完了
     ↓ 必須
-Phase 2（ワークフロー定義拡張）
+Phase 2（ワークフロー定義拡張）      ✅ 完了
     ↓ 必須
-Phase 3（Hook 改善）
-    ↓ 独立可（Phase 1 完了後に着手可能）
-Phase 4（Claude Code Channels）
+Phase 3（Hook 改善）               ✅ 完了
+    ↓
+Phase 4（Standalone 削除）         ✅ 完了
+    ↓
+Phase 5（自律駆動型ワークフロー）    🔲 未着手
 ```
-
-Phase 4 は Phase 1 完了後に他フェーズと並行して設計着手できるが、Phase 3 の hook 設計が固まってから実装するのが望ましい。
 
 ---
 
-## 廃止されるファイル・フィールド
+## 廃止されたファイル・フィールド
 
 | 廃止対象 | 理由 | 代替 |
 |---------|------|------|
@@ -432,4 +477,8 @@ Phase 4 は Phase 1 完了後に他フェーズと並行して設計着手でき
 | `.claude/hooks/post-bash-capture-test.sh` | 直接コマンドに移行 | `workflow-runner hook post-bash`（廃止） |
 | `.claude/hooks/pre-taskupdate-gate.sh` | 直接コマンドに移行 | `workflow-runner hook pre-taskupdate` |
 | `.claude/hooks/post-edit-validate-config.sh` | 直接コマンドに移行 | `workflow-runner hook post-edit` |
-| `call_anthropic_api()` | Claude Code Channels に移行 | `providers::channels` |
+| `call_anthropic_api()` | Standalone 削除に伴い廃止 | Phase 5 で再設計 |
+| `src/adapters/standalone/` | Phase 4 で削除 | `src/infra/shell.rs`（`run_command` のみ移植） |
+| `src/providers/claude_code/channels/` | Phase 4 で削除 | Phase 5 で再設計 |
+| `exec-step` CLI コマンド | Phase 4 で削除 | Phase 5 で再設計 |
+| `--adapter` CLI フラグ | Phase 4 で削除 | Phase 5 で再設計 |
