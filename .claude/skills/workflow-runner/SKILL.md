@@ -21,8 +21,14 @@ description: >
 
 1. `.workflow/config.yml` が存在するか確認する
    - **存在しない場合**：「`.workflow/config.yml` が見つかりません。`/workflow-create` でワークフローを新規作成してください」と案内して終了
-2. `target/debug/workflow-runner` が存在するか確認する
-   - **存在しない場合**：Bash で `cargo build` を実行してバイナリをビルドする
+
+2. `workflow-runner` バイナリを以下の優先順で探す：
+   1. `which workflow-runner` で PATH にあれば `workflow-runner` をそのまま使う
+   2. なければ `./target/debug/workflow-runner` を確認する
+   3. どちらも存在しない場合は `cargo build` を実行してビルドする
+
+   以降のコマンドは見つかったパスで置き換えて実行する（このドキュメントでは `workflow-runner` と表記）。
+
 3. 引数でワークフロー名が指定されていれば `start` へ。なければ以下へ
 
 ---
@@ -30,11 +36,13 @@ description: >
 ## 引数なしで呼ばれた場合
 
 ```bash
-./target/debug/workflow-runner next 2>/dev/null || ./target/debug/workflow-runner list
+workflow-runner next 2>/dev/null || workflow-runner list
 ```
 
-- `next` が state を読んで中断ワークフローを返した場合 → 再開フローへ
-- `next` が失敗した場合 → `list` の結果をユーザーに提示してワークフロー選択
+- `next` が中断中のワークフローを検出した場合 → そのまま再開フローへ（`next` の出力は `WorkflowOutput` 形式。`tasks` 配列を TaskCreate して dispatch する）
+- `next` が失敗した場合（進行中ワークフローなし）→ `list` の結果をユーザーに提示してワークフロー選択
+
+> **注意**：承認待ち（`awaiting_approval`）状態のときに `next` を呼ぶと、**自動的に承認されて次のタスクへ進む**。承認が必要かどうかをユーザーに確認してから呼ぶこと（承認フローの詳細は後述）。
 
 ---
 
@@ -43,7 +51,7 @@ description: >
 ### 1. ユーザーに確認する
 
 ```bash
-./target/debug/workflow-runner list
+workflow-runner list
 ```
 
 選択されたワークフローの内容を表示して確認を取る。
@@ -51,28 +59,54 @@ description: >
 ### 2. `start` を実行して最初のタスクを取得する
 
 ```bash
-./target/debug/workflow-runner start <workflow-name>
+workflow-runner start <workflow-name>
 ```
 
-出力 JSON の `workflow_id` と `tasks` 配列を保持する。
+出力は以下の JSON 形式（`WorkflowOutput`）：
+
+```json
+{
+  "workflow_id": "bug-fix-a1b2c3",
+  "workflow": "bug-fix",
+  "status": "started",
+  "tasks": [
+    {
+      "task_id": "reproduce",
+      "task": "バグを再現する",
+      "prompt": "バグを手元で再現し...",
+      "skills": [],
+      "agents": [],
+      "outputs": [],
+      "deny": null,
+      "approval": false
+    }
+  ]
+}
+```
+
+`workflow_id` と `tasks` 配列を保持して以降の処理に使う。
 
 ### 3. TaskCreate で各タスクを登録する
 
 `start` が返した `tasks` 配列の各タスクに対して **TaskCreate** を呼ぶ：
 
-- `subject`：タスクの `task` フィールド（簡潔なタスク名）
-- `description`：`prompt` があれば prompt の内容、なければ `task` の値
+- `subject`：`task` フィールドの値（`null` の場合は `task_id` を使う）
+- `description`：`prompt` があれば prompt の内容、なければ `subject` と同じ値
 - `metadata`：`{ "workflow_id": "<workflow_id>", "task_id": "<task_id>" }`
 
-返された TaskCreate の ID を記録し、実行・完了時に TaskUpdate でステータスを更新する。
+返された TaskCreate の ID（Tasks API の ID）を記録し、実行・完了時に TaskUpdate でステータスを更新する。
 
 ---
 
 ## タスクの dispatch
 
-`tasks` 配列の各 `TaskOutput` を `task` / `prompt` / `skills` / `agents` に従って実行する。
+`tasks` 配列の各タスクを `task` / `prompt` / `skills` / `agents` に従って実行する。
 
-実行開始前に TaskUpdate でステータスを `in_progress` に更新する。
+実行開始前に TaskUpdate でステータスを更新する：
+
+```
+TaskUpdate(id=<TaskCreate で得た ID>, status="in_progress")
+```
 
 | 条件 | 実行方法 |
 |------|---------|
@@ -86,29 +120,68 @@ description: >
 
 ## タスク完了後の処理
 
-各タスクが終わったら `report` → `complete` を呼ぶ：
+各タスクが終わったら `report` → `complete` の順に呼ぶ。
+
+### report：実行履歴を記録する
+
+`report` はゲートチェック前に実行履歴をステートに書き込むためのコマンド。
+`session_id` は将来予約フィールドで現時点では任意の文字列でよい。
+`exit_code` / `stdout` はオプション。
 
 ```bash
-echo '{"session_id":"<id>","task_id":"<task>","action_index":0,"action_type":"agent","exit_code":0,"stdout":""}' \
-  | ./target/debug/workflow-runner report
-
-./target/debug/workflow-runner complete <task-id>
+echo '{
+  "session_id": "n/a",
+  "task_id": "<task_id>",
+  "action_index": 0,
+  "action_type": "agent",
+  "exit_code": 0
+}' | workflow-runner report
 ```
 
-完了後、対応する TaskUpdate でステータスを `completed` に更新する。
+`action_type` の値：`"agent"`（Agent ツール実行）、`"skill"`（Skill 呼び出し）、`"run"`（手動作業）
 
-`complete` レスポンスの `next.tasks` に新しいタスクが含まれる場合は、
+### complete：ゲートチェックしてステートを進める
+
+```bash
+workflow-runner complete <task-id>
+```
+
+完了後、対応する TaskUpdate でステータスを `completed` に更新する：
+
+```
+TaskUpdate(id=<TaskCreate で得た ID>, status="completed")
+```
+
+`complete` が `allowed: true` を返し `next.tasks` に新しいタスクが含まれる場合は、
 **それぞれに対して TaskCreate を呼んで登録してから** dispatch する。
 
-### レスポンスの解釈
+### complete レスポンスの解釈
 
-| `allowed` | `next.status` | 対応 |
-|-----------|---------------|------|
-| `false` | — | `reason` をユーザーに伝えてブロック。gate 未実行なら該当作業を実行 |
-| `true` | `in_progress` | `next.tasks` を TaskCreate して dispatch する |
-| `true` | `completed` | ワークフロー完了。完了サマリーを表示する |
-| `true` | `blocked` | 未解決の依存がある。`status` で確認する |
-| `true` | `awaiting_approval` | 承認待ち（後述） |
+`complete` の出力：
+```json
+{
+  "task_id": "reproduce",
+  "allowed": true,
+  "reason": null,
+  "next": { "workflow_id": "...", "workflow": "...", "status": "in_progress", "tasks": [...] }
+}
+```
+
+| `allowed` | `next` | `next.status` | 対応 |
+|-----------|--------|---------------|------|
+| `false` | `null` | — | `reason` をユーザーに伝えてブロック。gate 未実行なら該当作業を実行してから `complete` を再実行 |
+| `true` | あり | `in_progress` | `next.tasks` を TaskCreate して dispatch する |
+| `true` | あり | `completed` | ワークフロー完了。完了サマリーを表示する |
+| `true` | あり | `blocked` | 未解決の依存タスクがある（後述） |
+| `true` | あり | `awaiting_approval` | 承認待ち（後述） |
+
+### `blocked` ステータスの対応
+
+```bash
+workflow-runner status --format table
+```
+
+テーブル表示で未完了の依存タスクを特定する。未完了タスクを完了させてから、ブロックされているタスクの `complete` を再度呼ぶ。
 
 ---
 
@@ -117,21 +190,21 @@ echo '{"session_id":"<id>","task_id":"<task>","action_index":0,"action_type":"ag
 `tasks` に `"agents": ["run-test", "run-lint"]` が含まれる場合：
 
 1. 各エージェントを Agent ツールで **並列起動** する（`.claude/agents/<name>.md` が定義）
-2. 各エージェント完了後、サブエージェント ID で `complete` を呼ぶ：
+2. 各エージェント完了後、`<親タスク ID>/<エージェント名>` の形式で `complete` を呼ぶ：
 
 ```bash
-./target/debug/workflow-runner complete <parent-task-id>/<agent-name>
-# 例: ./target/debug/workflow-runner complete quality-check/run-test
+workflow-runner complete <parent-task-id>/<agent-name>
+# 例: workflow-runner complete quality-check/run-test
 ```
 
 3. 全エージェント完了後、**親タスク ID** で `complete` を呼ぶ：
 
 ```bash
-./target/debug/workflow-runner complete <parent-task-id>
-# 例: ./target/debug/workflow-runner complete quality-check
+workflow-runner complete <parent-task-id>
+# 例: workflow-runner complete quality-check
 ```
 
-> gate チェックで未完了エージェントが残っていれば `allowed: false` が返る。
+> gate チェックで未完了エージェントが残っていれば `allowed: false` が返る。残りのエージェントを完了させてから `complete <parent>` を再試行する。
 
 ---
 
@@ -145,20 +218,22 @@ echo '{"session_id":"<id>","task_id":"<task>","action_index":0,"action_type":"ag
 ### 承認された場合
 
 ```bash
-./target/debug/workflow-runner next
+workflow-runner next
 ```
 
-承認が解除され、次タスクを dispatch する（TaskCreate で登録してから実行）。
+`next` を呼ぶと承認が通り、次のタスクが `WorkflowOutput` 形式で返る。
+`next.tasks` を TaskCreate で登録してから dispatch する。
 
 ### 却下された場合
 
 理由をヒアリングし：
 
 ```bash
-./target/debug/workflow-runner reject <task-id> --reason "<理由>"
+workflow-runner reject <task-id> --reason "<理由>"
 ```
 
-レスポンスの `task` を使って同タスクを再 dispatch する。
+レスポンスの `task` フィールドにタスク定義が返るので、それを使って同タスクを再 dispatch する。
+（`task` が `null` の場合は `status` でタスク定義を確認する）
 再完了後、同じ承認フローに入る（回数制限なし）。
 
 ---
@@ -166,7 +241,8 @@ echo '{"session_id":"<id>","task_id":"<task>","action_index":0,"action_type":"ag
 ## 状態確認
 
 ```bash
-./target/debug/workflow-runner status
+workflow-runner status             # JSON 形式
+workflow-runner status --format table  # テーブル形式（人間向け）
 ```
 
 ---
@@ -185,8 +261,9 @@ echo '{"session_id":"<id>","task_id":"<task>","action_index":0,"action_type":"ag
 
 | 状況 | 対応 |
 |------|------|
-| `workflow-runner` が存在しない | `cargo build` を実行してビルドする |
-| gate ブロック | `reason` を伝えて該当作業を実行してから再度 `complete` |
-| セッション中断 | `workflow-runner next` で再開情報を取得 |
+| `workflow-runner` が PATH にも `./target/debug/` にも存在しない | `cargo build` を実行してビルドする |
+| gate ブロック（`allowed: false`） | `reason` を伝えて該当作業を実行してから再度 `complete` |
+| `blocked` ステータス | `status --format table` で依存タスクを確認し、未完了タスクを先に完了させる |
+| セッション中断 | `workflow-runner next` で再開情報を取得（承認待ち中なら自動承認されるため注意） |
 | config.yml の警告 | スキーマ警告が出たら自己修正してから報告 |
 | agents で一部が未完了 | 残りのエージェントを完了させてから `complete <parent>` |
