@@ -13,9 +13,9 @@ workflow-runner start bug-fix
         ↓（JSON でアクション群を返す）
 SKILL.md が actions を dispatch
         ↓
-workflow-runner complete <step-id>
+workflow-runner complete <task-id>
         ↓（requires 未達なら）
-ブロック「依存ステップが未完了です」
+ブロック「依存タスクが未完了です」
 ```
 
 ## セットアップ
@@ -73,7 +73,7 @@ commands:
 ./target/debug/workflow-runner list                           # ワークフロー一覧
 ./target/debug/workflow-runner start bug-fix                  # 開始（workflow_id を返す）
 ./target/debug/workflow-runner --workflow-id <id> next        # 次のアクション確認
-./target/debug/workflow-runner --workflow-id <id> complete <step-id>  # ステップ完了
+./target/debug/workflow-runner --workflow-id <id> complete <task-id>  # タスク完了
 ./target/debug/workflow-runner status                         # 現在の状態（JSON）
 ./target/debug/workflow-runner status --format table          # 現在の状態（ターミナルテーブル）
 ./target/debug/workflow-runner validate                       # config.yml 検証（JSON）
@@ -104,8 +104,8 @@ imports:
 workflows:
   release:
     name: リリースフロー
-    steps:
-      # 手動ステップ（description に従って Claude が作業）
+    tasks:
+      # 手動タスク（description に従って Claude が作業）
       - id: design
         name: 設計確認
         description: 実装方針・影響範囲を整理して記録する
@@ -119,11 +119,11 @@ workflows:
           - "src/**"
           - "tests/**"
 
-      # 並列ステップ
+      # サブエージェントタスク（agents ブロック）
       - id: quality-check
         name: 品質チェック
         requires: [implement]
-        parallel:
+        agents:
           - id: lint
             actions:
               - type: agent

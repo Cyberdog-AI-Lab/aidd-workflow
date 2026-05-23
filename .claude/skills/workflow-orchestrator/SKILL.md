@@ -13,7 +13,7 @@ description: >
 # Workflow Orchestrator スキル（v2）
 
 `workflow-runner` バイナリが判断ロジックを持ち、このスキルはアクションを dispatch するだけ。
-各ステップのゲートは Hooks + `workflow-runner` が自動で検証する。
+各タスクのゲートは Hooks + `workflow-runner` が自動で検証する。
 
 ---
 
@@ -33,7 +33,7 @@ description: >
 ./target/debug/workflow-runner next 2>/dev/null || ./target/debug/workflow-runner list
 ```
 
-- `next` が state.json を読んで中断ワークフローを返した場合 → 再開フローへ
+- `next` が state を読んで中断ワークフローを返した場合 → 再開フローへ
 - `next` が失敗した場合 → `list` の結果をユーザーに提示してワークフロー選択
 
 ---
@@ -64,31 +64,30 @@ description: >
 
 | type | 実行方法 |
 |------|---------|
-| `run` | Bash ツールで `command` を実行する |
 | `agent` | Agent ツールで `prompt` を実行する。`background: true` なら並列実行してよい |
 | `skill` | Skill ツールで `skill` を呼び出す |
 | `workflow` | `./target/debug/workflow-runner start <workflow>` を再帰的に実行する |
-| `manual` | `description` に従って Claude が作業する。`checklist_key` があれば完了前に `.workflow/checklist.md` へ記録する |
+| `manual` | `description` に従って Claude が作業する |
 
 ---
 
 ## アクション完了後の処理
 
-各アクション実行後、`run` / `agent` / `skill` タイプは結果を report する：
+各アクション実行後、`agent` / `skill` タイプは結果を report する：
 
 ```bash
-echo '{"session_id":"<id>","step_id":"<step>","action_index":<n>,"action_type":"<type>","exit_code":<code>,"stdout":"<out>","stderr":""}' \
+echo '{"session_id":"<id>","task_id":"<task>","action_index":<n>,"action_type":"<type>","exit_code":<code>,"stdout":"<out>","stderr":""}' \
   | ./target/debug/workflow-runner report
 ```
 
 ---
 
-## ステップ完了
+## タスク完了
 
-1ステップの全アクションが終わったら complete を呼ぶ：
+1タスクの全アクションが終わったら complete を呼ぶ：
 
 ```bash
-./target/debug/workflow-runner complete <step-id>
+./target/debug/workflow-runner complete <task-id>
 ```
 
 ### レスポンスの解釈
@@ -102,38 +101,38 @@ echo '{"session_id":"<id>","step_id":"<step>","action_index":<n>,"action_type":"
 
 ---
 
-## 並列アクションの実行
+## サブエージェントアクションの実行
 
-### 並列ブロック（`parallel: true`）
+### agents ブロック（`sub_agent: true`）
 
-`actions` 配列に `"parallel": true` の `ActionItem` が含まれる場合、それらは並列ブロックのサブステップを表す。`step_id` は `"parent/sub"` 形式になる。
+`actions` 配列に `"sub_agent": true` の `ActionItem` が含まれる場合、それらは `agents` ブロックのサブエージェントを表す。`task_id` は `"parent/sub"` 形式になる。
 
 ```
 actions: [
-  { "step_id": "quality-check/run-test", "parallel": true, "type": "run",   "command": "make test", "gate": true },
-  { "step_id": "quality-check/run-lint", "parallel": true, "type": "run",   "command": "make lint" },
-  { "step_id": "quality-check/security", "parallel": true, "type": "skill", "skill": "security-review" }
+  { "task_id": "quality-check/run-test", "sub_agent": true, "type": "agent", "prompt": "make test を実行してください" },
+  { "task_id": "quality-check/run-lint", "sub_agent": true, "type": "agent", "prompt": "make lint を実行してください" },
+  { "task_id": "quality-check/security", "sub_agent": true, "type": "skill", "skill": "security-review" }
 ]
 ```
 
 実行方針：
-- `type: run` の並列アクション → 順番に Bash で実行する（Bash は非同期不可）
-- `type: agent` / `type: skill` で `background: true` → Agent ツールで並列起動する
-- `type: agent` / `type: skill` で `background: false` → 順番に実行する
+- `sub_agent: true` のアクションは Agent ツールでサブエージェントとして起動する
+- `background: true` → 複数サブエージェントを並列起動する
+- `background: false` → 順番に実行する
 
-各アクション完了後、`report` を呼んで結果を記録する。`step_id` はサブステップ ID（`parent/sub`）を使う。
+各アクション完了後、`report` を呼んで結果を記録する。`task_id` はサブエージェント ID（`parent/sub`）を使う。
 
-全サブステップが完了したら、**親ステップの ID**（`/` を含まない部分）で `complete` を呼ぶ：
+全サブエージェントが完了したら、**親タスクの ID**（`/` を含まない部分）で `complete` を呼ぶ：
 
 ```bash
 ./target/debug/workflow-runner complete quality-check
 ```
 
-### エージェントアクション内の background（`parallel: false`）
+### エージェントアクション内の background（`sub_agent: false`）
 
-同一ステップの `actions` 配列に複数の `ActionItem` が含まれ、`type: agent` かつ `background: true` のものがある場合：
+同一タスクの `actions` 配列に複数の `ActionItem` が含まれ、`type: agent` かつ `background: true` のものがある場合：
 - `background: true` の `agent` / `skill` は Agent ツールで並列起動する
-- `run` アクションは直列実行（Bash は非同期対応していないため）
+- `background: false` は順番に実行する
 
 ---
 
@@ -151,8 +150,6 @@ actions: [
 
 ```
 ## ワークフロー完了：{workflow.name}
-
-チェックリスト：.workflow/checklist.md
 ```
 
 ---

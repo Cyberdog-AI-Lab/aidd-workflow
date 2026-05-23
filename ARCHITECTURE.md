@@ -8,13 +8,13 @@
 
 | 問題 | 解決方法 |
 |------|---------|
-| Claude が前ステップを飛ばして完了と報告する | `requires` のゲートチェック（Rust）|
-| ステップの内容を毎回 Claude が解釈する（非決定論） | `actions` フィールドで実行内容を宣言的に記述 |
-| セッションをまたいで作業が中断する | SQLite でステップ状態を永続化 |
+| Claude が前タスクを飛ばして完了と報告する | `requires` のゲートチェック（Rust）|
+| タスクの内容を毎回 Claude が解釈する（非決定論） | `actions` フィールドで実行内容を宣言的に記述 |
+| セッションをまたいで作業が中断する | SQLite でタスク状態を永続化 |
 | AI ツール固有の API に依存する | `providers/` 層で差異を吸収し `adapters/` は抽象化 |
 | 複数ワークフローを同時進行できない | SQLite + `--workflow-id` で並行管理 |
-| 対象外のファイルを誤って編集する | ステップ単位の `allow_files` / `deny` 制約 |
-| 独立したステップが直列待ちになる | `parallel` ブロックで複数サブステップを同時返却 |
+| 対象外のファイルを誤って編集する | タスク単位の `allow_files` / `deny` 制約 |
+| 独立したタスクが直列待ちになる | `agents` ブロックで複数サブエージェントを同時返却 |
 
 ### 設計原則
 
@@ -70,12 +70,12 @@ aidd-workflow/
 ├── src/
 │   ├── main.rs                          CLI エントリポイント（clap）
 │   ├── config/
-│   │   ├── types.rs                     Config / Workflow / Step / SubStep / Action 型定義（Pure）
+│   │   ├── types.rs                     Config / Workflow / Task / SubAgentTask / Action 型定義（Pure）
 │   │   └── loader.rs                    YAML ロード・imports 解決・バリデーション（Shell）
 │   ├── engine/
 │   │   ├── state.rs                     WorkflowState 型定義・純粋メソッド（Pure）
 │   │   ├── store.rs                     SQLite 読み書き・WorkflowStore trait（Shell）
-│   │   ├── dag.rs                       requires 依存グラフ評価・サブステップ DAG（Pure）
+│   │   ├── dag.rs                       requires 依存グラフ評価・サブエージェント DAG（Pure）
 │   │   ├── gate.rs                      requires ゲートチェック（Pure）
 │   │   └── executor.rs                  next_actions の構築・テンプレート解決（Pure）
 │   ├── adapters/
@@ -135,16 +135,16 @@ commands:
 - `commands` は同一キーがある場合、インライン定義が優先される
 - `workflows` は同一 slug がある場合エラー
 
-### ステップの基本構造（v5）
+### タスクの基本構造（v5）
 
 ```yaml
 workflows:
   <slug>:
     name: ワークフロー名
     description: 説明（任意）
-    steps:
-      - id: <step-id>             # 一意なステップ ID（checklist_key の代替）
-        name: ステップ名
+    tasks:
+      - id: <task-id>             # 一意なタスク ID
+        name: タスク名
         description: 説明
 
         # --- 実行制御 ---
@@ -155,7 +155,7 @@ workflows:
             skill: security-review
 
         # --- 依存と前提条件 ---
-        requires: [<step-id>, ...] # 依存ステップ（DAG の辺）
+        requires: [<task-id>, ...] # 依存タスク（DAG の辺）
 
         # --- アクセス制御（InProgress 中のみ有効）---
         allow_files:              # 編集を許可するファイルパターン（空なら制限なし）
@@ -177,18 +177,18 @@ workflows:
 
 > **廃止**: `type: run` は `actions` に移行。`type: workflow` は `imports:` での子ワークフロー埋め込みに移行。
 
-### ステップの形態
+### タスクの形態
 
 ```yaml
-# 1. 自動ステップ（agent/skill アクション）
+# 1. 自動タスク（agent/skill アクション）
 - id: test
   actions:
     - type: agent
       prompt: "{{commands.test}} を実行してテストがすべてパスすることを確認してください"
 
-# 2. 並列ステップ（parallel ブロック）
+# 2. サブエージェントタスク（agents ブロック）
 - id: quality-check
-  parallel:
+  agents:
     - id: run-test
       actions:
         - type: agent
@@ -199,7 +199,7 @@ workflows:
           prompt: "make lint を実行してください"
       requires: [run-test]
 
-# 3. 手動ステップ（actions も parallel もなし）
+# 3. 手動タスク（actions も agents もなし）
 - id: design
   description: 実装方針を整理して記録する
   allow_files:
@@ -219,7 +219,7 @@ start <workflow>          ワークフロー開始 → 最初の actions を JSO
                           出力の workflow_id を以降の --workflow-id に使用する
 next                      次の actions を JSON で返す
 report                    アクション実行結果を記録（stdin: JSON）
-complete <step-id>        ステップ完了（ゲートチェック付き）→ 次の actions を返す
+complete <task-id>        タスク完了（ゲートチェック付き）→ 次の actions を返す
 resume                    中断ワークフローの再開情報を返す
 status [--format json|table]   現在の実行状態を返す
 validate [--format json|text]  config.yml を検証する
@@ -296,7 +296,7 @@ CREATE TABLE workflow_runs (
 
 CREATE TABLE step_states (
     workflow_id    TEXT NOT NULL REFERENCES workflow_runs(workflow_id) ON DELETE CASCADE,
-    step_id        TEXT NOT NULL,        -- "step-id" または "parent/sub"
+    step_id        TEXT NOT NULL,        -- "task-id" または "parent/sub"
     status         TEXT NOT NULL DEFAULT 'pending',
     started_at     TEXT,
     completed_at   TEXT,
@@ -330,7 +330,7 @@ CREATE TABLE action_reports (
 
 ### allow_files / deny
 
-InProgress 状態のステップに `allow_files` または `deny.files` が設定されている場合、
+InProgress 状態のタスクに `allow_files` または `deny.files` が設定されている場合、
 `PreToolUse(Edit/Write)` hook が編集を制御する。
 
 ```
@@ -340,9 +340,9 @@ PreToolUse(Edit/Write) hook 発火
         ↓
 workflow-runner hook pre-edit（stdin: hook JSON）
         ↓
-InProgress ステップの allow_files / deny.files を確認
+InProgress タスクの allow_files / deny.files を確認
         ↓
-allow_files に合致しない → {"decision":"block","reason":"..."} を返す
+allow_files に合致しない → {"decision":"ask","reason":"..."} を返す
 deny.files に合致する → {"decision":"block","reason":"..."} を返す
 "decision":"ask" → Claude に確認を促す
 問題なし → 何も返さない（編集を許可）
@@ -360,13 +360,13 @@ deny.files に合致する → {"decision":"block","reason":"..."} を返す
 design ──▶ implement ──▶ quality-check ──▶ complete
                               │
                          ┌────┴──────┐
-                     run-test    run-lint   ← 並列サブステップ
+                     run-test    run-lint   ← サブエージェント
 ```
 
 `dag.executable_items()` はこのグラフを評価して **同時に実行可能なアイテム** を返す。
 
-- 通常ステップ: `requires` が全て `Completed` になったステップを返す
-- 並列ブロック: 全サブステップを同時に返す（各サブステップの `requires` も評価する）
+- 通常タスク: `requires` が全て `Completed` になったタスクを返す
+- agents ブロック: 全サブエージェントを同時に返す（各サブエージェントの `requires` も評価する）
 
 ---
 
@@ -452,14 +452,14 @@ main()
       ├─ WorkflowState::new(workflow_name, wf)
       │    ├─ workflow_id = Uuid::new_v4()
       │    ├─ started_at = Utc::now()
-      │    └─ steps: 全ステップ + 全サブステップ を Pending で初期化
+      │    └─ tasks: 全タスク + 全サブエージェントを Pending で初期化
       │
       ├─ engine::store::save_state(cwd, &state)   # SQLite へ upsert
       │
       ├─ executor::build_next(wf, &state, &config)
       │    ├─ dag::is_workflow_complete() → false（初回なので false）
       │    ├─ dag::executable_items(wf, state)
-      │    │    └─ requires が空 かつ Pending なステップを返す
+      │    │    └─ requires が空 かつ Pending なタスクを返す
       │    └─ ActionItem を構築（テンプレート解決含む）
       │
       └─ JSON 出力: { workflow_id, status: "started", actions: [...] }
@@ -480,32 +480,32 @@ cmd_report(cwd, workflow_id?)
   ├─ read_stdin() → serde_json::from_str::<ReportInput>()
   ├─ load_config() + resolve_state()
   │
-  ├─ step.status が Pending なら InProgress に遷移・started_at を記録
-  ├─ step.action_reports に ActionReport を追加
+  ├─ task.status が Pending なら InProgress に遷移・started_at を記録
+  ├─ task.action_reports に ActionReport を追加
   │     { action_index, action_type, exit_code, stdout, recorded_at }
   │
-  ├─ dag::parent_of(step_id) → Some(parent_id) の場合
-  │    └─ state.sync_parallel_parent(parent_id, wf)
-  │         ├─ 全サブステップ Completed → 親を Completed に遷移
+  ├─ dag::parent_of(task_id) → Some(parent_id) の場合
+  │    └─ state.sync_agents_parent(parent_id, wf)
+  │         ├─ 全サブエージェント Completed → 親を Completed に遷移
   │         └─ 1つでも Started → 親を InProgress に遷移
   │
   ├─ save_state()
-  └─ JSON 出力: { ok: true, step_id }
+  └─ JSON 出力: { ok: true, task_id }
 ```
 
-### `complete <step_id>`
+### `complete <task_id>`
 
 ```
-cmd_complete(cwd, step_id, workflow_id?)
+cmd_complete(cwd, task_id, workflow_id?)
   ├─ load_config() + resolve_state()
   │
-  ├─ engine::gate::check(wf, &state, step_id)
-  │    └─ step.requires: 依存ステップが全て Completed か確認
+  ├─ engine::gate::check(wf, &state, task_id)
+  │    └─ task.requires: 依存タスクが全て Completed か確認
   │
   ├─ gate NG → CompleteOutput { allowed: false, reason: ... } を返して終了
   │
-  ├─ step.status = Completed、completed_at = Utc::now() を記録
-  ├─ dag::parent_of(step_id) → Some → sync_parallel_parent()
+  ├─ task.status = Completed、completed_at = Utc::now() を記録
+  ├─ dag::parent_of(task_id) → Some → sync_agents_parent()
   ├─ save_state()
   │
   ├─ executor::build_next()  →  next アクションを取得
@@ -534,14 +534,14 @@ cmd_hook(cwd, event_type)
   │    ├─ serde_json::from_str::<PreEditEvent>()
   │    ├─ load_config() + load_state()
   │    ├─ 絶対パス → cwd からの相対パスに変換
-  │    └─ InProgress なステップに対して:
+  │    └─ InProgress なタスクに対して:
   │         ├─ allow_files 非空 かつ非マッチ → {"decision":"ask","reason":"..."}
   │         └─ deny.files にマッチ → {"decision":"block","reason":"..."}
   │
   └─ "pre-bash"
        ├─ serde_json::from_str::<PreBashEvent>()
        ├─ load_config() + load_state()
-       └─ InProgress なステップの deny.commands と照合
+       └─ InProgress なタスクの deny.commands と照合
             └─ 部分一致 or /regex/ マッチ → {"decision":"block","reason":"..."}
 ```
 
@@ -572,29 +572,29 @@ update:
 
 ```rust
 executable_items(wf, state) -> Vec<String>:
-  for step in wf.steps:
-    if step.status is Completed | Failed  → skip
-    if !requires_met(wf, state, step.requires)  → skip
+  for task in wf.tasks:
+    if task.status is Completed | Failed  → skip
+    if !requires_met(wf, state, task.requires)  → skip
 
-    if step.parallel is Some(subs):
+    if task.agents is Some(subs):
       for sub in subs:
-        key = "{step.id}/{sub.id}"
+        key = "{task.id}/{sub.id}"
         if sub.status is Pending | InProgress AND sub.requires met:
           push(key)
     else:
-      if step.status is Pending | InProgress:
-        push(step.id)
+      if task.status is Pending | InProgress:
+        push(task.id)
 ```
 
-並列ブロックは親ステップのキー（`"parent_id"`）ではなく、子のキー（`"parent_id/sub_id"`）を返します。親ステップのステータスは `sync_parallel_parent()` が各 report / complete 時に自動的に更新します。
+agents ブロックは親タスクのキー（`"parent_id"`）ではなく、子のキー（`"parent_id/sub_id"`）を返します。親タスクのステータスは `sync_agents_parent()` が各 report / complete 時に自動的に更新します。
 
 ---
 
-## ステップのステータス遷移
+## タスクのステータス遷移
 
 ```
 Pending
-  │  ← report（初回、step_state を InProgress に遷移）
+  │  ← report（初回、task_state を InProgress に遷移）
   ▼
 InProgress
   │  ← complete → gate::check()（requires）通過
@@ -602,9 +602,9 @@ InProgress
 Completed
 ```
 
-並列サブステップ（`parent_id/sub_id`）：
-- 各サブステップが独立して `Pending → InProgress → Completed` を辿る
-- `sync_parallel_parent()` が呼ばれるたびに：
+サブエージェント（`parent_id/sub_id`）：
+- 各サブエージェントが独立して `Pending → InProgress → Completed` を辿る
+- `sync_agents_parent()` が呼ばれるたびに：
   - 全サブ Completed → 親を `Completed` に遷移
   - 1つ以上が Started → 親を `InProgress` に遷移
 
@@ -625,10 +625,10 @@ load_config(cwd)
       └─ 再帰完了後、トップレベルで validate() を実行
 
 validate(&config):  ← マージ後の Config にのみ実行（個別インポートファイルには実行しない）
-  ├─ 各ワークフロー: steps が空でないか
-  ├─ 各ステップ: actions と parallel を同時に持っていないか
-  ├─ 各ステップ: requires に未定義ステップが含まれていないか
-  └─ 各ステップ: actions と parallel の排他確認
+  ├─ 各ワークフロー: tasks が空でないか
+  ├─ 各タスク: actions と agents を同時に持っていないか
+  ├─ 各タスク: requires に未定義タスクが含まれていないか
+  └─ 各タスク: actions と agents の排他確認
      → エラーを全件収集して ValidationError として返す
 
 【JSON Schema の生成と整合性】
