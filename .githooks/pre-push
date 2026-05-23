@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# main への直接プッシュ禁止・ブランチ命名規則を強制する
+
+set -e
+
+VALID_BRANCH_PATTERN="^(feat|fix|refactor|chore|docs|style|test)/[a-zA-Z0-9][a-zA-Z0-9_-]*$"
+
+while IFS=' ' read -r _local_ref _local_sha remote_ref _remote_sha; do
+  remote_branch="${remote_ref#refs/heads/}"
+
+  if [[ "$remote_branch" == "main" ]]; then
+    echo "エラー: main への直接プッシュは禁止されています。PR を作成してください。" >&2
+    exit 1
+  fi
+
+  if ! echo "$remote_branch" | grep -qE "$VALID_BRANCH_PATTERN"; then
+    echo "エラー: ブランチ名の形式が正しくありません: $remote_branch" >&2
+    echo "正しい形式: <type>/<概要>" >&2
+    echo "有効なtype: feat, fix, refactor, chore, docs, style, test" >&2
+    echo "例: feat/42-add-auth  fix/55-login-error" >&2
+    exit 1
+  fi
+done
