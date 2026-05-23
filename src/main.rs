@@ -207,7 +207,7 @@ fn cmd_complete(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result<
         .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
-    let gate_result = gate::check(wf, &state, step_id, cwd);
+    let gate_result = gate::check(wf, &state, step_id);
     if !gate_result.allowed {
         let output = CompleteOutput {
             step_id: step_id.to_string(),

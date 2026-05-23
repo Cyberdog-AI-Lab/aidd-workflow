@@ -52,9 +52,6 @@ pub struct Step {
     /// Explicit deny rules for files and shell commands.
     #[serde(default)]
     pub deny: Option<DenyRules>,
-    /// Preconditions that must hold before this step can begin.
-    #[serde(default)]
-    pub guards: Vec<Guard>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default, JsonSchema)]
@@ -66,16 +63,6 @@ pub struct DenyRules {
     /// Shell command patterns forbidden from running (substring match).
     #[serde(default)]
     pub commands: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Guard {
-    /// ID of a step that must have completed (checked at runtime).
-    pub step: String,
-    /// Files that must exist before this step can begin (glob or /regex/).
-    #[serde(default)]
-    pub required_files: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
@@ -159,7 +146,6 @@ name: Step 1"#;
         assert!(step.parallel.is_none());
         assert!(step.allow_files.is_empty());
         assert!(step.deny.is_none());
-        assert!(step.guards.is_empty());
     }
 
     #[test]
@@ -194,20 +180,6 @@ deny:
         let deny = step.deny.unwrap();
         assert_eq!(deny.files, vec!["docs/specs/**"]);
         assert_eq!(deny.commands, vec!["git push"]);
-    }
-
-    #[test]
-    fn step_parses_guards() {
-        let yaml = r#"id: impl
-name: Implement
-guards:
-  - step: design
-    required_files:
-      - "docs/**/*.md""#;
-        let step: Step = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(step.guards.len(), 1);
-        assert_eq!(step.guards[0].step, "design");
-        assert_eq!(step.guards[0].required_files, vec!["docs/**/*.md"]);
     }
 
     #[test]

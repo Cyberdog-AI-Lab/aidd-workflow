@@ -1,7 +1,5 @@
-use crate::config::loader::matches_pattern;
 use crate::config::types::Workflow;
 use crate::engine::state::{StepStatus, WorkflowState};
-use std::path::Path;
 
 pub struct GateResult {
     pub allowed: bool,
@@ -9,7 +7,7 @@ pub struct GateResult {
 }
 
 /// Checks whether the given step can transition to Completed.
-pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str, cwd: &Path) -> GateResult {
+pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult {
     let (cfg_step_id, sub_id) = if let Some(idx) = step_id.find('/') {
         (&step_id[..idx], Some(&step_id[idx + 1..]))
     } else {
@@ -44,35 +42,6 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str, cwd: &Path) ->
                 };
             }
         }
-
-        // guards check: referenced step must be completed and required_files must exist
-        for guard in &step.guards {
-            let guard_done = state
-                .steps
-                .get(&guard.step)
-                .map(|s| s.status == StepStatus::Completed)
-                .unwrap_or(false);
-            if !guard_done {
-                return GateResult {
-                    allowed: false,
-                    reason: Some(format!(
-                        "step '{}' guard requires '{}' to be completed first",
-                        step_id, guard.step
-                    )),
-                };
-            }
-            for pattern in &guard.required_files {
-                if !any_file_matches(cwd, pattern) {
-                    return GateResult {
-                        allowed: false,
-                        reason: Some(format!(
-                            "step '{}' guard: no file matching '{}' found (required by step '{}')",
-                            step_id, pattern, guard.step
-                        )),
-                    };
-                }
-            }
-        }
     }
 
     GateResult {
@@ -81,42 +50,11 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str, cwd: &Path) ->
     }
 }
 
-/// Returns true if any file under `cwd` matches the given pattern.
-fn any_file_matches(cwd: &Path, pattern: &str) -> bool {
-    walk_files(cwd, cwd, pattern)
-}
-
-fn walk_files(root: &Path, dir: &Path, pattern: &str) -> bool {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if walk_files(root, &path, pattern) {
-                return true;
-            }
-        } else if let Ok(rel) = path.strip_prefix(root) {
-            let rel_str = rel.to_string_lossy();
-            if matches_pattern(pattern, &rel_str) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Guard, Step, Workflow};
+    use crate::config::types::{Step, Workflow};
     use crate::engine::state::{StepStatus, WorkflowState};
-    use std::path::PathBuf;
-
-    fn dummy_cwd() -> PathBuf {
-        std::env::temp_dir()
-    }
 
     fn workflow_with_requires() -> Workflow {
         Workflow {
@@ -144,7 +82,7 @@ mod tests {
         let mut state = WorkflowState::new("test", &wf);
         state.steps.get_mut("a").unwrap().status = StepStatus::Completed;
 
-        let result = check(&wf, &state, "b", &dummy_cwd());
+        let result = check(&wf, &state, "b");
         assert!(result.allowed);
     }
 
@@ -153,7 +91,7 @@ mod tests {
         let wf = workflow_with_requires();
         let state = WorkflowState::new("test", &wf);
 
-        let result = check(&wf, &state, "b", &dummy_cwd());
+        let result = check(&wf, &state, "b");
         assert!(!result.allowed);
     }
 
@@ -163,36 +101,7 @@ mod tests {
         let mut state = WorkflowState::new("test", &wf);
         state.steps.get_mut("a").unwrap().status = StepStatus::Completed;
 
-        let result = check(&wf, &state, "b", &dummy_cwd());
+        let result = check(&wf, &state, "b");
         assert!(result.allowed);
-    }
-
-    #[test]
-    fn guards_check_blocks_when_guard_step_not_done() {
-        let wf = Workflow {
-            name: "test".to_string(),
-            description: None,
-            steps: vec![
-                Step {
-                    id: "design".to_string(),
-                    name: "Design".to_string(),
-                    ..Step::default()
-                },
-                Step {
-                    id: "impl".to_string(),
-                    name: "Implement".to_string(),
-                    guards: vec![Guard {
-                        step: "design".to_string(),
-                        required_files: vec![],
-                    }],
-                    ..Step::default()
-                },
-            ],
-        };
-        let state = WorkflowState::new("test", &wf);
-
-        let result = check(&wf, &state, "impl", &dummy_cwd());
-        assert!(!result.allowed);
-        assert!(result.reason.unwrap().contains("guard"));
     }
 }

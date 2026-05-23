@@ -96,14 +96,6 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
                     ));
                 }
             }
-            for guard in &step.guards {
-                if !ids.contains(guard.step.as_str()) {
-                    errors.push(format!(
-                        "step '{}' in workflow '{}': guard references unknown step '{}'",
-                        step.id, slug, guard.step
-                    ));
-                }
-            }
         }
     }
 
@@ -174,19 +166,6 @@ mod tests {
         wf.steps[0].requires.push("nonexistent".to_string());
         let err = validate(&config).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
-    }
-
-    #[test]
-    fn validate_rejects_unknown_guard_step() {
-        use crate::config::types::Guard;
-        let mut config = minimal_config();
-        let wf = config.workflows.get_mut("wf").unwrap();
-        wf.steps[0].guards.push(Guard {
-            step: "ghost".to_string(),
-            required_files: vec![],
-        });
-        let err = validate(&config).unwrap_err();
-        assert!(err.to_string().contains("ghost"));
     }
 
     #[test]

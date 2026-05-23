@@ -60,8 +60,6 @@ workflows:
         deny:
           files:
             - "docs/specs/**"
-        guards:
-          - step: design
         requires: [design]
 
       - id: complete

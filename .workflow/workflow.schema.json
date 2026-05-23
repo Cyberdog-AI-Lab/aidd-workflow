@@ -129,27 +129,6 @@
       },
       "additionalProperties": false
     },
-    "Guard": {
-      "type": "object",
-      "required": [
-        "step"
-      ],
-      "properties": {
-        "required_files": {
-          "description": "Files that must exist before this step can begin (glob or /regex/).",
-          "default": [],
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "step": {
-          "description": "ID of a step that must have completed (checked at runtime).",
-          "type": "string"
-        }
-      },
-      "additionalProperties": false
-    },
     "Step": {
       "description": "One step in a workflow. Holds either `actions` or `parallel`, never both. A step with neither is a manual step: Claude works from `description`.",
       "type": "object",
@@ -191,14 +170,6 @@
             "string",
             "null"
           ]
-        },
-        "guards": {
-          "description": "Preconditions that must hold before this step can begin.",
-          "default": [],
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/Guard"
-          }
         },
         "id": {
           "description": "Unique step identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`",
