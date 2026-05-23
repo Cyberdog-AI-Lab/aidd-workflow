@@ -10,7 +10,7 @@ pub struct Config {
     /// Additional YAML files to merge, relative to .workflow/
     #[serde(default)]
     pub imports: Vec<String>,
-    /// Named shell commands. Use `{{commands.<key>}}` in pre/post_commands for interpolation.
+    /// Named shell commands. Use `{{commands.<key>}}` in action prompts for interpolation.
     #[serde(default)]
     pub commands: HashMap<String, String>,
     #[serde(default)]
@@ -46,14 +46,6 @@ pub struct Step {
     /// IDs of steps that must complete before this step starts (checked at runtime).
     #[serde(default)]
     pub requires: Vec<String>,
-    /// Shell commands run automatically when the step becomes InProgress.
-    /// Supports `{{commands.<key>}}` interpolation.
-    #[serde(default)]
-    pub pre_commands: Vec<String>,
-    /// Shell commands run as a gate before Complete is allowed.
-    /// Supports `{{commands.<key>}}` interpolation.
-    #[serde(default)]
-    pub post_commands: Vec<String>,
     /// File path patterns permitted for editing while InProgress (glob or /regex/).
     #[serde(default)]
     pub allow_files: Vec<String>,
@@ -165,8 +157,6 @@ name: Step 1"#;
         assert!(step.requires.is_empty());
         assert!(step.actions.is_empty());
         assert!(step.parallel.is_none());
-        assert!(step.pre_commands.is_empty());
-        assert!(step.post_commands.is_empty());
         assert!(step.allow_files.is_empty());
         assert!(step.deny.is_none());
         assert!(step.guards.is_empty());
@@ -185,19 +175,6 @@ name: Step 1"#;
 requires: [sub1]"#;
         let sub: SubStep = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(sub.requires, vec!["sub1"]);
-    }
-
-    #[test]
-    fn step_parses_pre_post_commands() {
-        let yaml = r#"id: impl
-name: Implement
-pre_commands:
-  - cargo check
-post_commands:
-  - cargo test"#;
-        let step: Step = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(step.pre_commands, vec!["cargo check"]);
-        assert_eq!(step.post_commands, vec!["cargo test"]);
     }
 
     #[test]

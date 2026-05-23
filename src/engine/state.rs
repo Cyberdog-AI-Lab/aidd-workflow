@@ -21,9 +21,6 @@ pub struct StepState {
     pub status: StepStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
-    /// Whether a gate:true run action has been executed and recorded.
-    #[serde(default)]
-    pub gate_recorded: bool,
     #[serde(default)]
     pub action_reports: Vec<ActionReport>,
 }

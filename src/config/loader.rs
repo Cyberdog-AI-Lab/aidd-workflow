@@ -137,15 +137,7 @@ mod tests {
         let step = Step {
             id: "step1".to_string(),
             name: "Step 1".to_string(),
-            description: None,
-            actions: vec![],
-            parallel: None,
-            requires: vec![],
-            pre_commands: vec![],
-            post_commands: vec![],
-            allow_files: vec![],
-            deny: None,
-            guards: vec![],
+            ..Step::default()
         };
         let mut workflows = HashMap::new();
         workflows.insert(

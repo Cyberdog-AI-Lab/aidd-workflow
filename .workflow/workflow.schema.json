@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "commands": {
-      "description": "Named shell commands. Use `{{commands.<key>}}` in pre/post_commands for interpolation.",
+      "description": "Named shell commands. Use `{{commands.<key>}}` in action prompts for interpolation.",
       "default": {},
       "type": "object",
       "additionalProperties": {
@@ -216,22 +216,6 @@
           ],
           "items": {
             "$ref": "#/definitions/SubStep"
-          }
-        },
-        "post_commands": {
-          "description": "Shell commands run as a gate before Complete is allowed. Supports `{{commands.<key>}}` interpolation.",
-          "default": [],
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "pre_commands": {
-          "description": "Shell commands run automatically when the step becomes InProgress. Supports `{{commands.<key>}}` interpolation.",
-          "default": [],
-          "type": "array",
-          "items": {
-            "type": "string"
           }
         },
         "requires": {

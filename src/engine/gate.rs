@@ -75,24 +75,6 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str, cwd: &Path) ->
         }
     }
 
-    // post_commands gate: requires gate_recorded to be true
-    if sub_id.is_none() && !step.post_commands.is_empty() {
-        let recorded = state
-            .steps
-            .get(step_id)
-            .map(|s| s.gate_recorded)
-            .unwrap_or(false);
-        if !recorded {
-            return GateResult {
-                allowed: false,
-                reason: Some(format!(
-                    "gate check failed: post_commands for step '{}' have not been executed yet",
-                    step_id
-                )),
-            };
-        }
-    }
-
     GateResult {
         allowed: true,
         reason: None,
@@ -125,29 +107,6 @@ fn walk_files(root: &Path, dir: &Path, pattern: &str) -> bool {
     false
 }
 
-/// Used by hooks: returns a block reason if any in-progress step has unexecuted post_commands.
-pub fn hook_check_any_blocked(wf: &Workflow, state: &WorkflowState) -> Option<String> {
-    for step in &wf.steps {
-        if step.post_commands.is_empty() {
-            continue;
-        }
-
-        let step_state = state.steps.get(&step.id);
-        let is_active = step_state
-            .map(|s| s.status == StepStatus::InProgress)
-            .unwrap_or(false);
-        let recorded = step_state.map(|s| s.gate_recorded).unwrap_or(false);
-
-        if is_active && !recorded {
-            return Some(format!(
-                "gate check failed: post_commands for step '{}' have not been executed",
-                step.id
-            ));
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,26 +118,6 @@ mod tests {
         std::env::temp_dir()
     }
 
-    fn workflow_with_post_commands() -> Workflow {
-        Workflow {
-            name: "test".to_string(),
-            description: None,
-            steps: vec![Step {
-                id: "test".to_string(),
-                name: "Test".to_string(),
-                description: None,
-                actions: vec![],
-                parallel: None,
-                requires: vec![],
-                pre_commands: vec![],
-                post_commands: vec!["make test".to_string()],
-                allow_files: vec![],
-                deny: None,
-                guards: vec![],
-            }],
-        }
-    }
-
     fn workflow_with_requires() -> Workflow {
         Workflow {
             name: "test".to_string(),
@@ -187,58 +126,20 @@ mod tests {
                 Step {
                     id: "a".to_string(),
                     name: "A".to_string(),
-                    description: None,
-                    actions: vec![],
-                    parallel: None,
-                    requires: vec![],
-                    pre_commands: vec![],
-                    post_commands: vec![],
-                    allow_files: vec![],
-                    deny: None,
-                    guards: vec![],
+                    ..Step::default()
                 },
                 Step {
                     id: "b".to_string(),
                     name: "B".to_string(),
-                    description: None,
-                    actions: vec![],
-                    parallel: None,
                     requires: vec!["a".to_string()],
-                    pre_commands: vec![],
-                    post_commands: vec![],
-                    allow_files: vec![],
-                    deny: None,
-                    guards: vec![],
+                    ..Step::default()
                 },
             ],
         }
     }
 
     #[test]
-    fn gate_check_blocks_when_post_commands_not_recorded() {
-        let wf = workflow_with_post_commands();
-        let mut state = WorkflowState::new("test", &wf);
-        state.steps.get_mut("test").unwrap().status = StepStatus::InProgress;
-
-        let result = check(&wf, &state, "test", &dummy_cwd());
-        assert!(!result.allowed);
-        assert!(result.reason.unwrap().contains("gate check failed"));
-    }
-
-    #[test]
-    fn gate_check_passes_when_post_commands_recorded() {
-        let wf = workflow_with_post_commands();
-        let mut state = WorkflowState::new("test", &wf);
-        let s = state.steps.get_mut("test").unwrap();
-        s.status = StepStatus::InProgress;
-        s.gate_recorded = true;
-
-        let result = check(&wf, &state, "test", &dummy_cwd());
-        assert!(result.allowed);
-    }
-
-    #[test]
-    fn gate_check_passes_without_post_commands() {
+    fn gate_check_passes_without_unmet_requires() {
         let wf = workflow_with_requires();
         let mut state = WorkflowState::new("test", &wf);
         state.steps.get_mut("a").unwrap().status = StepStatus::Completed;
@@ -275,31 +176,16 @@ mod tests {
                 Step {
                     id: "design".to_string(),
                     name: "Design".to_string(),
-                    description: None,
-                    actions: vec![],
-                    parallel: None,
-                    requires: vec![],
-                    pre_commands: vec![],
-                    post_commands: vec![],
-                    allow_files: vec![],
-                    deny: None,
-                    guards: vec![],
+                    ..Step::default()
                 },
                 Step {
                     id: "impl".to_string(),
                     name: "Implement".to_string(),
-                    description: None,
-                    actions: vec![],
-                    parallel: None,
-                    requires: vec![],
-                    pre_commands: vec![],
-                    post_commands: vec![],
-                    allow_files: vec![],
-                    deny: None,
                     guards: vec![Guard {
                         step: "design".to_string(),
                         required_files: vec![],
                     }],
+                    ..Step::default()
                 },
             ],
         };
@@ -308,27 +194,5 @@ mod tests {
         let result = check(&wf, &state, "impl", &dummy_cwd());
         assert!(!result.allowed);
         assert!(result.reason.unwrap().contains("guard"));
-    }
-
-    #[test]
-    fn hook_check_blocks_in_progress_post_commands_step() {
-        let wf = workflow_with_post_commands();
-        let mut state = WorkflowState::new("test", &wf);
-        state.steps.get_mut("test").unwrap().status = StepStatus::InProgress;
-
-        let reason = hook_check_any_blocked(&wf, &state);
-        assert!(reason.is_some());
-    }
-
-    #[test]
-    fn hook_check_passes_when_gate_recorded() {
-        let wf = workflow_with_post_commands();
-        let mut state = WorkflowState::new("test", &wf);
-        let s = state.steps.get_mut("test").unwrap();
-        s.status = StepStatus::InProgress;
-        s.gate_recorded = true;
-
-        let reason = hook_check_any_blocked(&wf, &state);
-        assert!(reason.is_none());
     }
 }

@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS step_states (
     workflow_id    TEXT NOT NULL REFERENCES workflow_runs(workflow_id) ON DELETE CASCADE,
     step_id        TEXT NOT NULL,
     status         TEXT NOT NULL DEFAULT 'pending',
-    gate_recorded  INTEGER NOT NULL DEFAULT 0,
     started_at     TEXT,
     completed_at   TEXT,
     PRIMARY KEY (workflow_id, step_id)
@@ -80,22 +79,21 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
         .with_timezone(&Utc);
 
     let mut stmt = conn.prepare(
-        "SELECT step_id, status, gate_recorded, started_at, completed_at
+        "SELECT step_id, status, started_at, completed_at
          FROM step_states WHERE workflow_id = ?1",
     )?;
     let step_rows = stmt.query_map(params![workflow_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
+            row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
         ))
     })?;
 
     let mut steps: HashMap<String, StepState> = HashMap::new();
     for row in step_rows {
-        let (step_id, status_str, gate_recorded, started_str, completed_str) = row?;
+        let (step_id, status_str, started_str, completed_str) = row?;
         let started_at_step = started_str
             .as_deref()
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
@@ -111,7 +109,6 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
                 status: str_to_status(&status_str),
                 started_at: started_at_step,
                 completed_at: completed_at_step,
-                gate_recorded: gate_recorded != 0,
                 action_reports: vec![],
             },
         );
@@ -220,13 +217,12 @@ pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
     for (step_id, step) in &state.steps {
         conn.execute(
             "INSERT OR REPLACE INTO step_states
-             (workflow_id, step_id, status, gate_recorded, started_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (workflow_id, step_id, status, started_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 state.workflow_id,
                 step_id,
                 status_to_str(&step.status),
-                step.gate_recorded as i64,
                 step.started_at.map(|dt| dt.to_rfc3339()),
                 step.completed_at.map(|dt| dt.to_rfc3339()),
             ],

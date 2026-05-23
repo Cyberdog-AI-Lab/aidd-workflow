@@ -33,10 +33,6 @@ workflows:
         allow_files:
           - "src/**"
           - "tests/**"
-        pre_commands:
-          - "{{commands.build}}"
-        post_commands:
-          - "{{commands.test}}"
         requires: [reproduce, identify]
 
       - id: complete
@@ -64,10 +60,6 @@ workflows:
         deny:
           files:
             - "docs/specs/**"
-        pre_commands:
-          - "{{commands.build}}"
-        post_commands:
-          - "{{commands.test}}"
         guards:
           - step: design
         requires: [design]

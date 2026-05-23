@@ -16,7 +16,6 @@ use config::loader::{load_config, validate as validate_config};
 use engine::state::{ActionReport, StepStatus, WorkflowState};
 use engine::store::{clear_state_by_id, load_state, load_state_by_id, save_state};
 use engine::{dag, executor, gate};
-use infra::shell as shell_runner;
 use protocol::{
     input::ReportInput,
     output::{
@@ -207,44 +206,6 @@ fn cmd_complete(cwd: &Path, step_id: &str, workflow_id: Option<&str>) -> Result<
         .workflows
         .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found", state.workflow))?;
-
-    // Run post_commands as the gate before allowing Complete.
-    if let Some(step) = wf.steps.iter().find(|s| s.id == step_id) {
-        if !step.post_commands.is_empty() {
-            let already_recorded = state
-                .steps
-                .get(step_id)
-                .map(|s| s.gate_recorded)
-                .unwrap_or(false);
-
-            if !already_recorded {
-                let resolved: Vec<String> = step
-                    .post_commands
-                    .iter()
-                    .map(|c| executor::resolve_template(c, &config))
-                    .collect();
-
-                for cmd in &resolved {
-                    let result = shell_runner::run_command(cmd, cwd)?;
-                    if result.exit_code != 0 {
-                        let output = CompleteOutput {
-                            step_id: step_id.to_string(),
-                            allowed: false,
-                            reason: Some(format!(
-                                "post_commands gate failed: '{}' exited with code {}",
-                                cmd, result.exit_code
-                            )),
-                            next: None,
-                        };
-                        return Ok(serde_json::to_string_pretty(&output)?);
-                    }
-                }
-
-                let s = state.steps.entry(step_id.to_string()).or_default();
-                s.gate_recorded = true;
-            }
-        }
-    }
 
     let gate_result = gate::check(wf, &state, step_id, cwd);
     if !gate_result.allowed {

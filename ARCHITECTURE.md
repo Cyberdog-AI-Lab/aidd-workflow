@@ -8,7 +8,7 @@
 
 | 問題 | 解決方法 |
 |------|---------|
-| Claude がテストを飛ばして完了と報告する | `post_commands` のゲートチェック（Rust）|
+| Claude が前ステップを飛ばして完了と報告する | `requires` / `guards` のゲートチェック（Rust）|
 | ステップの内容を毎回 Claude が解釈する（非決定論） | `actions` フィールドで実行内容を宣言的に記述 |
 | セッションをまたいで作業が中断する | SQLite でステップ状態を永続化 |
 | AI ツール固有の API に依存する | `providers/` 層で差異を吸収し `adapters/` は抽象化 |
@@ -78,7 +78,7 @@ aidd-workflow/
 │   │   ├── store.rs                     SQLite 読み書き・WorkflowStore trait（Shell）
 │   │   ├── dag.rs                       requires 依存グラフ評価・サブステップ DAG（Pure）
 │   │   ├── gate.rs                      gate 条件 + guards チェック（Pure）
-│   │   └── executor.rs                  next_actions の構築・pre/post_commands 付与（Pure）
+│   │   └── executor.rs                  next_actions の構築・テンプレート解決（Pure）
 │   ├── adapters/
 │   │   └── hooks/
 │   │       └── hook_handler.rs          Claude Code フック処理（providers 経由・Shell）
@@ -86,7 +86,6 @@ aidd-workflow/
 │   │   └── claude_code/
 │   │       └── hook_parser.rs           Claude Code hook JSON → 型安全な構造体（Pure）
 │   ├── infra/
-│   │   ├── shell.rs                     run_command（sh -c によるシェル実行・Shell）
 │   │   └── settings_writer.rs           .claude/settings.json の生成・更新（Shell）
 │   └── protocol/
 │       ├── input.rs                     report コマンドの stdin 型（Pure）
@@ -150,10 +149,6 @@ workflows:
         description: 説明
 
         # --- 実行制御 ---
-        pre_commands:             # ステップ開始時に自動実行
-          - make check
-        post_commands:            # ステップ完了前にゲートとして実行
-          - make test             # 失敗するとステップを完了できない
         actions:                  # Agent / Skill のみ（type: run は廃止）
           - type: agent
             prompt: "..."
@@ -185,25 +180,28 @@ workflows:
 | `agent` | `prompt`, `background: bool` | サブエージェント起動。`background: true` で並列実行可 |
 | `skill` | `skill`, `args: []` | スキル呼び出し |
 
-> **廃止**: `type: run` は `pre_commands` / `post_commands` に移行。`type: workflow` は `imports:` での子ワークフロー埋め込みに移行。
+> **廃止**: `type: run` は `actions` に移行。`type: workflow` は `imports:` での子ワークフロー埋め込みに移行。
 
 ### ステップの形態
 
 ```yaml
-# 1. 自動ステップ（post_commands でゲート）
+# 1. 自動ステップ（agent/skill アクション）
 - id: test
-  post_commands:
-    - "{{commands.test}}"
+  actions:
+    - type: agent
+      prompt: "{{commands.test}} を実行してテストがすべてパスすることを確認してください"
 
 # 2. 並列ステップ（parallel ブロック）
 - id: quality-check
   parallel:
     - id: run-test
-      post_commands:
-        - make test
+      actions:
+        - type: agent
+          prompt: "make test を実行してください"
     - id: run-lint
-      post_commands:
-        - make lint
+      actions:
+        - type: agent
+          prompt: "make lint を実行してください"
       requires: [run-test]
 
 # 3. 手動ステップ（actions も parallel もなし）
@@ -211,9 +209,6 @@ workflows:
   description: 実装方針を整理して記録する
   allow_files:
     - "docs/**"
-
-# 4. 子ワークフローのステップ埋め込み
-- import: workflows/code-review-steps.yml
 ```
 
 ---
@@ -262,14 +257,10 @@ SKILL.md（Claude Code）                workflow-runner
         │── start bug-fix ────────────────────▶│ workflow.db 作成
         │◀── { workflow_id: "...", actions: [...] } │
         │                                      │
-        │── [pre_commands を実行] ─────────────│  (Bash ツール経由)
-        │                                      │
         │── [actions(agent/skill) を実行] ──────│
         │                                      │
-        │── [post_commands を実行] ────────────│  (Bash ツール経由)
-        │                                      │
         │── report ───────────────────────────▶│ workflow.db 更新
-        │◀── { ok: true } ────────────────────│ gate_recorded = true
+        │◀── { ok: true } ────────────────────│
         │                                      │
         │── complete test ────────────────────▶│ gate / guards チェック
         │◀── { allowed: true, next: {...} } ───│ workflow.db 更新
@@ -311,7 +302,6 @@ CREATE TABLE step_states (
     workflow_id    TEXT NOT NULL REFERENCES workflow_runs(workflow_id) ON DELETE CASCADE,
     step_id        TEXT NOT NULL,        -- "step-id" または "parent/sub"
     status         TEXT NOT NULL DEFAULT 'pending',
-    gate_recorded  INTEGER NOT NULL DEFAULT 0,
     started_at     TEXT,
     completed_at   TEXT,
     PRIMARY KEY (workflow_id, step_id)
@@ -339,26 +329,6 @@ CREATE TABLE action_reports (
 | hook イベント | `cwd` で active を絞り込み（全件チェック） |
 
 ---
-
-## ゲートメカニズム
-
-`post_commands` に宣言されたコマンドは「実行の証明」を要求する。
-
-```
-config.yml に post_commands を宣言
-        ↓
-SKILL.md が post_commands を Bash で実行
-        ↓
-workflow-runner report で記録（stdout / exit_code を SQLite に保存）
-        ↓
-SQLite の gate_recorded = true（exit_code = 0 のみ）
-        ↓
-workflow-runner complete <step-id>
-        ↓
-gate.rs が gate_recorded を確認 → allowed: true
-        ↓
-ステップ Completed に遷移
-```
 
 ---
 
@@ -427,7 +397,7 @@ design ──▶ implement ──▶ quality-check ──▶ complete
 |----|------|--------|
 | `providers/claude_code/` | Claude Code 固有の hook JSON を型安全な構造体にパース | `PostBashEvent`, `PreEditEvent` |
 | `adapters/hooks/` | パース済みイベントを受け取り、engine 層を呼んで `HookResponse` を返す | `handle_pre_edit()` |
-| `infra/shell` | シェルコマンド実行（`post_commands` ゲートで使用） | `run_command()` |
+| `infra/settings_writer` | settings.json の生成・更新 | `write_settings_json()` |
 
 `adapters/` は `providers/` を使うが、具体的な JSON 形式を知らない。
 `providers/` は `engine/` や `config/` を知らない（純粋な変換のみ）。
@@ -438,7 +408,7 @@ design ──▶ implement ──▶ quality-check ──▶ complete
 |--------|-----------|---------|
 | `pre-edit` | Edit/Write 実行前 | allow_files / deny.files チェック → block / ask |
 | `pre-bash` | Bash 実行前 | deny.commands チェック → block |
-| `pre-taskupdate` | TaskUpdate 実行前 | gate 未実行チェック → block |
+| `pre-taskupdate` | TaskUpdate 実行前 | no-op |
 | `post-edit` | Edit/Write 実行後 | config.yml 変更検出 → スキーマ検証警告 |
 
 フックはエラーで終了しない（exit 0 固定）。ワークフロー外の操作を干渉しない設計。
@@ -510,7 +480,7 @@ main()
       │    ├─ dag::is_workflow_complete() → false（初回なので false）
       │    ├─ dag::executable_items(wf, state)
       │    │    └─ requires が空 かつ Pending なステップを返す
-      │    └─ ActionItem を構築（pre/post_commands・テンプレート解決含む）
+      │    └─ ActionItem を構築（テンプレート解決含む）
       │
       └─ JSON 出力: { workflow_id, status: "started", actions: [...] }
 ```
@@ -549,20 +519,11 @@ cmd_report(cwd, workflow_id?)
 cmd_complete(cwd, step_id, workflow_id?)
   ├─ load_config() + resolve_state()
   │
-  ├─ [post_commands ゲート実行]  ← gate_recorded=false の場合のみ
-  │    ├─ step.post_commands を executor::resolve_template() で展開
-  │    ├─ infra::shell::run_command(cmd, cwd) を順に実行
-  │    │    └─ sh -c <cmd> をサブプロセスで実行・stdout/stderr/exit_code を取得
-  │    ├─ exit_code != 0 → CompleteOutput { allowed: false, reason: "gate failed: ..." }
-  │    └─ 全成功 → step_state.gate_recorded = true に更新
-  │
   ├─ engine::gate::check(wf, &state, step_id, cwd)
   │    ├─ step.requires: 依存ステップが全て Completed か確認
-  │    ├─ step.guards:
-  │    │    ├─ 指定ステップが Completed か確認
-  │    │    └─ required_files パターンが cwd 以下に存在するか確認（再帰 walk）
-  │    └─ post_commands がある場合 gate_recorded = true か確認
-  │         → false なら GateResult { allowed: false, reason: "gate check failed" }
+  │    └─ step.guards:
+  │         ├─ 指定ステップが Completed か確認
+  │         └─ required_files パターンが cwd 以下に存在するか確認（再帰 walk）
   │
   ├─ gate NG → CompleteOutput { allowed: false, reason: ... } を返して終了
   │
@@ -588,12 +549,7 @@ cmd_hook(cwd, event_type)
   │    └─ handle_post_bash()   → no-op（常に Ok(())）
   │
   ├─ "pre-taskupdate"
-  │    ├─ serde_json::from_str::<PreTaskUpdateEvent>()
-  │    ├─ tool_input.status != "completed" → None（スキップ）
-  │    ├─ load_config() + load_state()
-  │    ├─ gate::hook_check_any_blocked(wf, &state)
-  │    │    └─ InProgress かつ gate_recorded=false のステップがあれば Some(reason)
-  │    └─ block → {"decision":"block","reason":"..."} を返す
+  │    └─ no-op（常に None を返す）
   │
   ├─ "post-edit"
   │    ├─ serde_json::from_str::<PostEditEvent>()
@@ -667,7 +623,7 @@ Pending
   │  ← report（初回、step_state を InProgress に遷移）
   ▼
 InProgress
-  │  ← complete → post_commands 実行 → gate::check() 通過
+  │  ← complete → gate::check()（requires / guards）通過
   ▼
 Completed
 ```
@@ -724,9 +680,11 @@ validate(&config):  ← マージ後の Config にのみ実行（個別インポ
 commands:
   test: make test
 
-post_commands:
-  - "{{commands.test}}"   # → "make test" に展開
-  - "{{commands.lint}}"   # → 未定義のため "{{commands.lint}}" のまま
+actions:
+  - type: agent
+    prompt: "{{commands.test}} を実行してください"   # → "make test を実行してください" に展開
+  - type: agent
+    prompt: "{{commands.lint}} を実行してください"   # → 未定義のため "{{commands.lint}} ..." のまま
 ```
 
 ---
@@ -737,4 +695,4 @@ post_commands:
 |------------|------|
 | 通常コマンド（start / next / complete 等） | `anyhow::Result` でエラーを伝播。`main()` が `ErrorOutput` JSON を stderr に出力し exit code 1 で終了 |
 | フックハンドラ（`cmd_hook`） | エラーでプロセスをクラッシュさせてはならない。JSON パース失敗・設定不在は `None` を返す（ワークフロー外の操作を干渉しない） |
-| `run_command` 失敗（post_commands） | `CompleteOutput { allowed: false, reason }` を返して処理を継続（プロセスは終了しない） |
+| gate チェック失敗（requires / guards） | `CompleteOutput { allowed: false, reason }` を返して処理を継続（プロセスは終了しない） |
