@@ -32,7 +32,7 @@ pub fn handle_post_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
 }
 
 /// Claude Code PreToolUse(Edit/Write) hook.
-/// Returns `{"decision":"ask"}` when the file is outside allow_files for the active task,
+/// Returns `{"decision":"ask"}` when the file is outside outputs for the active task,
 /// or `{"decision":"block"}` when it matches deny.files.
 pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
     let event: PreEditEvent = match serde_json::from_str(hook_json) {
@@ -70,17 +70,14 @@ pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
             continue;
         }
 
-        // allow_files: non-empty list means the file must match at least one pattern.
-        if !task.allow_files.is_empty() {
-            let allowed = task
-                .allow_files
-                .iter()
-                .any(|p| matches_pattern(p, &rel_path));
+        // outputs: non-empty list means the file must match at least one pattern.
+        if !task.outputs.is_empty() {
+            let allowed = task.outputs.iter().any(|p| matches_pattern(p, &rel_path));
             if !allowed {
                 let decision = serde_json::json!({
                     "decision": "ask",
                     "reason": format!(
-                        "[{}] '{}' is outside allow_files for task '{}'",
+                        "[{}] '{}' is outside outputs for task '{}'",
                         task.id, rel_path, task.name
                     )
                 });
@@ -270,13 +267,13 @@ mod tests {
     }
 
     #[test]
-    fn pre_edit_asks_when_outside_allow_files() {
+    fn pre_edit_asks_when_outside_outputs() {
         let dir = tempdir().unwrap();
         setup_workflow_dir(dir.path());
 
         write_config(
             dir.path(),
-            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        allow_files:\n          - \"src/**\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        outputs:\n          - \"src/**\"\n",
         );
 
         let wf_for_state = Workflow {
@@ -285,7 +282,7 @@ mod tests {
             tasks: vec![Task {
                 id: "impl".to_string(),
                 name: "Implement".to_string(),
-                allow_files: vec!["src/**".to_string()],
+                outputs: vec!["src/**".to_string()],
                 ..Task::default()
             }],
         };
@@ -303,13 +300,13 @@ mod tests {
     }
 
     #[test]
-    fn pre_edit_allows_matching_allow_file() {
+    fn pre_edit_allows_matching_output() {
         let dir = tempdir().unwrap();
         setup_workflow_dir(dir.path());
 
         write_config(
             dir.path(),
-            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        allow_files:\n          - \"src/**\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        outputs:\n          - \"src/**\"\n",
         );
 
         let wf_for_state = Workflow {
@@ -318,7 +315,7 @@ mod tests {
             tasks: vec![Task {
                 id: "impl".to_string(),
                 name: "Implement".to_string(),
-                allow_files: vec!["src/**".to_string()],
+                outputs: vec!["src/**".to_string()],
                 ..Task::default()
             }],
         };

@@ -46,9 +46,10 @@ pub struct Task {
     /// IDs of tasks that must complete before this task starts (checked at runtime).
     #[serde(default)]
     pub requires: Vec<String>,
-    /// File path patterns permitted for editing while InProgress (glob or /regex/).
+    /// File path patterns the agent is expected to create or modify as outputs (glob or /regex/).
+    /// Non-empty list restricts editing to matching paths only while InProgress.
     #[serde(default)]
-    pub allow_files: Vec<String>,
+    pub outputs: Vec<String>,
     /// Explicit deny rules for files and shell commands.
     #[serde(default)]
     pub deny: Option<DenyRules>,
@@ -144,7 +145,7 @@ name: Task 1"#;
         assert!(task.requires.is_empty());
         assert!(task.actions.is_empty());
         assert!(task.agents.is_none());
-        assert!(task.allow_files.is_empty());
+        assert!(task.outputs.is_empty());
         assert!(task.deny.is_none());
     }
 
@@ -164,10 +165,10 @@ requires: [sub1]"#;
     }
 
     #[test]
-    fn task_parses_allow_files_and_deny() {
+    fn task_parses_outputs_and_deny() {
         let yaml = r#"id: s
 name: S
-allow_files:
+outputs:
   - "src/**"
   - "/.*\\.md$/"
 deny:
@@ -176,7 +177,7 @@ deny:
   commands:
     - "git push""#;
         let task: Task = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(task.allow_files.len(), 2);
+        assert_eq!(task.outputs.len(), 2);
         let deny = task.deny.unwrap();
         assert_eq!(deny.files, vec!["docs/specs/**"]);
         assert_eq!(deny.commands, vec!["git push"]);

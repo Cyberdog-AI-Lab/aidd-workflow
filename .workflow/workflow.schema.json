@@ -167,8 +167,8 @@
 						"$ref": "#/definitions/SubAgentTask"
 					}
 				},
-				"allow_files": {
-					"description": "File path patterns permitted for editing while InProgress (glob or /regex/).",
+				"outputs": {
+					"description": "File path patterns the agent is expected to create or modify as outputs (glob or /regex/). Non-empty list restricts editing to matching paths only while InProgress.",
 					"default": [],
 					"type": "array",
 					"items": {

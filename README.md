@@ -109,13 +109,13 @@ workflows:
       - id: design
         name: 設計確認
         description: 実装方針・影響範囲を整理して記録する
-        allow_files:             # InProgress 中は docs/ 以下のみ編集可
+        outputs:                 # InProgress 中は docs/ 以下のみ編集可
           - "docs/**"
 
       - id: implement
         name: 実装
         requires: [design]
-        allow_files:
+        outputs:
           - "src/**"
           - "tests/**"
 

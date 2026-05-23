@@ -30,7 +30,7 @@ workflows:
       - id: implement
         name: 修正実装
         description: 最小限の変更でバグを修正する。影響範囲を意識すること
-        allow_files:
+        outputs:
           - "src/**"
           - "tests/**"
         requires: [reproduce, identify]
@@ -47,14 +47,14 @@ workflows:
       - id: design
         name: 設計確認
         description: 実装方針・影響範囲・インターフェースを整理して記録する
-        allow_files:
+        outputs:
           - "docs/**"
           - "/.*\\.md$/"
 
       - id: implement
         name: 実装
         description: 設計に従って実装する
-        allow_files:
+        outputs:
           - "src/**"
           - "tests/**"
         deny:
@@ -74,14 +74,14 @@ workflows:
       - id: design
         name: 設計確認
         description: 実装方針・影響範囲・インターフェースを整理して記録する
-        allow_files:
+        outputs:
           - "docs/**"
 
       - id: implement
         name: 実装
         description: 設計に従って実装する
         requires: [design]
-        allow_files:
+        outputs:
           - "src/**"
           - "tests/**"
 
