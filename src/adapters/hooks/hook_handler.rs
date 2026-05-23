@@ -32,7 +32,7 @@ pub fn handle_post_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
 }
 
 /// Claude Code PreToolUse(Edit/Write) hook.
-/// Returns `{"decision":"ask"}` when the file is outside allow_files for the active step,
+/// Returns `{"decision":"ask"}` when the file is outside allow_files for the active task,
 /// or `{"decision":"block"}` when it matches deny.files.
 pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
     let event: PreEditEvent = match serde_json::from_str(hook_json) {
@@ -59,10 +59,10 @@ pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| abs_path.clone());
 
-    for step in &wf.steps {
+    for task in &wf.tasks {
         let is_active = state
-            .steps
-            .get(&step.id)
+            .tasks
+            .get(&task.id)
             .map(|s| s.status == StepStatus::InProgress)
             .unwrap_or(false);
 
@@ -71,8 +71,8 @@ pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
         }
 
         // allow_files: non-empty list means the file must match at least one pattern.
-        if !step.allow_files.is_empty() {
-            let allowed = step
+        if !task.allow_files.is_empty() {
+            let allowed = task
                 .allow_files
                 .iter()
                 .any(|p| matches_pattern(p, &rel_path));
@@ -80,8 +80,8 @@ pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
                 let decision = serde_json::json!({
                     "decision": "ask",
                     "reason": format!(
-                        "[{}] '{}' is outside allow_files for step '{}'",
-                        step.id, rel_path, step.name
+                        "[{}] '{}' is outside allow_files for task '{}'",
+                        task.id, rel_path, task.name
                     )
                 });
                 return Ok(Some(decision.to_string()));
@@ -89,14 +89,14 @@ pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
         }
 
         // deny.files: any matching pattern is an explicit block.
-        if let Some(deny) = &step.deny {
+        if let Some(deny) = &task.deny {
             for pattern in &deny.files {
                 if matches_pattern(pattern, &rel_path) {
                     let decision = serde_json::json!({
                         "decision": "block",
                         "reason": format!(
-                            "[{}] editing '{}' is denied by step '{}' (rule: '{}')",
-                            step.id, rel_path, step.name, pattern
+                            "[{}] editing '{}' is denied by task '{}' (rule: '{}')",
+                            task.id, rel_path, task.name, pattern
                         )
                     });
                     return Ok(Some(decision.to_string()));
@@ -109,7 +109,7 @@ pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
 }
 
 /// Claude Code PreToolUse(Bash) hook.
-/// Returns `{"decision":"block"}` when the command matches deny.commands for the active step.
+/// Returns `{"decision":"block"}` when the command matches deny.commands for the active task.
 pub fn handle_pre_bash(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
     let event: PreBashEvent = match serde_json::from_str(hook_json) {
         Ok(e) => e,
@@ -131,10 +131,10 @@ pub fn handle_pre_bash(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
 
     let command = &event.tool_input.command;
 
-    for step in &wf.steps {
+    for task in &wf.tasks {
         let is_active = state
-            .steps
-            .get(&step.id)
+            .tasks
+            .get(&task.id)
             .map(|s| s.status == StepStatus::InProgress)
             .unwrap_or(false);
 
@@ -142,14 +142,14 @@ pub fn handle_pre_bash(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
             continue;
         }
 
-        if let Some(deny) = &step.deny {
+        if let Some(deny) = &task.deny {
             for pattern in &deny.commands {
                 if matches_command_pattern(pattern, command) {
                     let decision = serde_json::json!({
                         "decision": "block",
                         "reason": format!(
-                            "[{}] command '{}' is denied by step '{}' (rule: '{}')",
-                            step.id, command, step.name, pattern
+                            "[{}] command '{}' is denied by task '{}' (rule: '{}')",
+                            task.id, command, task.name, pattern
                         )
                     });
                     return Ok(Some(decision.to_string()));
@@ -176,7 +176,7 @@ fn matches_command_pattern(pattern: &str, command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{DenyRules, Step, Workflow};
+    use crate::config::types::{DenyRules, Task, Workflow};
     use crate::engine::state::{StepStatus, WorkflowState};
     use crate::engine::store::save_state;
     use std::collections::HashMap;
@@ -187,17 +187,17 @@ mod tests {
         std::fs::create_dir_all(&wf_dir).unwrap();
     }
 
-    fn make_workflow_with_step(step: Step) -> Workflow {
+    fn make_workflow_with_task(task: Task) -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![step],
+            tasks: vec![task],
         }
     }
 
-    fn active_state(workflow_name: &str, step_id: &str, wf: &Workflow) -> WorkflowState {
+    fn active_state(workflow_name: &str, task_id: &str, wf: &Workflow) -> WorkflowState {
         let mut state = WorkflowState::new(workflow_name, wf);
-        state.steps.get_mut(step_id).unwrap().status = StepStatus::InProgress;
+        state.tasks.get_mut(task_id).unwrap().status = StepStatus::InProgress;
         state
     }
 
@@ -239,23 +239,23 @@ mod tests {
         let dir = tempdir().unwrap();
         setup_workflow_dir(dir.path());
 
-        let step = Step {
+        let task = Task {
             id: "impl".to_string(),
             name: "Implement".to_string(),
             deny: Some(DenyRules {
                 files: vec!["docs/specs/**".to_string()],
                 commands: vec![],
             }),
-            ..Step::default()
+            ..Task::default()
         };
-        let wf = make_workflow_with_step(step);
+        let wf = make_workflow_with_task(task);
         let mut state = active_state("test", "impl", &wf);
         state.workflow = "test".to_string();
 
         // Write minimal config so load_config succeeds.
         write_config(
             dir.path(),
-            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    steps:\n      - id: impl\n        name: Implement\n        deny:\n          files:\n            - \"docs/specs/**\"\n",
+            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          files:\n            - \"docs/specs/**\"\n",
         );
         save_state(dir.path(), &state).unwrap();
 
@@ -276,17 +276,17 @@ mod tests {
 
         write_config(
             dir.path(),
-            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    steps:\n      - id: impl\n        name: Implement\n        allow_files:\n          - \"src/**\"\n",
+            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        allow_files:\n          - \"src/**\"\n",
         );
 
         let wf_for_state = Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "impl".to_string(),
                 name: "Implement".to_string(),
                 allow_files: vec!["src/**".to_string()],
-                ..Step::default()
+                ..Task::default()
             }],
         };
         let state = active_state("test", "impl", &wf_for_state);
@@ -309,17 +309,17 @@ mod tests {
 
         write_config(
             dir.path(),
-            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    steps:\n      - id: impl\n        name: Implement\n        allow_files:\n          - \"src/**\"\n",
+            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        allow_files:\n          - \"src/**\"\n",
         );
 
         let wf_for_state = Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "impl".to_string(),
                 name: "Implement".to_string(),
                 allow_files: vec!["src/**".to_string()],
-                ..Step::default()
+                ..Task::default()
             }],
         };
         let state = active_state("test", "impl", &wf_for_state);
@@ -343,20 +343,20 @@ mod tests {
 
         write_config(
             dir.path(),
-            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    steps:\n      - id: impl\n        name: Implement\n        deny:\n          commands:\n            - \"git push\"\n",
+            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          commands:\n            - \"git push\"\n",
         );
 
         let wf_for_state = Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "impl".to_string(),
                 name: "Implement".to_string(),
                 deny: Some(DenyRules {
                     files: vec![],
                     commands: vec!["git push".to_string()],
                 }),
-                ..Step::default()
+                ..Task::default()
             }],
         };
         let state = active_state("test", "impl", &wf_for_state);
@@ -378,20 +378,20 @@ mod tests {
 
         write_config(
             dir.path(),
-            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    steps:\n      - id: impl\n        name: Implement\n        deny:\n          commands:\n            - \"git push\"\n",
+            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          commands:\n            - \"git push\"\n",
         );
 
         let wf_for_state = Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "impl".to_string(),
                 name: "Implement".to_string(),
                 deny: Some(DenyRules {
                     files: vec![],
                     commands: vec!["git push".to_string()],
                 }),
-                ..Step::default()
+                ..Task::default()
             }],
         };
         let state = active_state("test", "impl", &wf_for_state);

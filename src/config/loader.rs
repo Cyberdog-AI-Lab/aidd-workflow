@@ -76,23 +76,23 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
     let mut errors = Vec::new();
 
     for (slug, wf) in &config.workflows {
-        if wf.steps.is_empty() {
-            errors.push(format!("workflow '{}' has no steps", slug));
+        if wf.tasks.is_empty() {
+            errors.push(format!("workflow '{}' has no tasks", slug));
         }
-        let ids: HashSet<&str> = wf.steps.iter().map(|s| s.id.as_str()).collect();
+        let ids: HashSet<&str> = wf.tasks.iter().map(|s| s.id.as_str()).collect();
 
-        for step in &wf.steps {
-            if !step.actions.is_empty() && step.parallel.is_some() {
+        for task in &wf.tasks {
+            if !task.actions.is_empty() && task.agents.is_some() {
                 errors.push(format!(
-                    "step '{}' in workflow '{}': cannot have both actions and parallel",
-                    step.id, slug
+                    "task '{}' in workflow '{}': cannot have both actions and agents",
+                    task.id, slug
                 ));
             }
-            for req in &step.requires {
+            for req in &task.requires {
                 if !ids.contains(req.as_str()) {
                     errors.push(format!(
-                        "step '{}' in workflow '{}': unknown requires '{}'",
-                        step.id, slug, req
+                        "task '{}' in workflow '{}': unknown requires '{}'",
+                        task.id, slug, req
                     ));
                 }
             }
@@ -122,14 +122,14 @@ pub fn matches_pattern(pattern: &str, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Step, Workflow};
+    use crate::config::types::{Task, Workflow};
     use std::collections::HashMap;
 
     fn minimal_config() -> Config {
-        let step = Step {
-            id: "step1".to_string(),
-            name: "Step 1".to_string(),
-            ..Step::default()
+        let task = Task {
+            id: "task1".to_string(),
+            name: "Task 1".to_string(),
+            ..Task::default()
         };
         let mut workflows = HashMap::new();
         workflows.insert(
@@ -137,7 +137,7 @@ mod tests {
             Workflow {
                 name: "WF".to_string(),
                 description: None,
-                steps: vec![step],
+                tasks: vec![task],
             },
         );
         Config {
@@ -163,21 +163,21 @@ mod tests {
     fn validate_rejects_unknown_requires() {
         let mut config = minimal_config();
         let wf = config.workflows.get_mut("wf").unwrap();
-        wf.steps[0].requires.push("nonexistent".to_string());
+        wf.tasks[0].requires.push("nonexistent".to_string());
         let err = validate(&config).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
     }
 
     #[test]
-    fn validate_rejects_both_actions_and_parallel() {
-        use crate::config::types::{Action, SubStep};
+    fn validate_rejects_both_actions_and_agents() {
+        use crate::config::types::{Action, AgentTask};
         let mut config = minimal_config();
         let wf = config.workflows.get_mut("wf").unwrap();
-        wf.steps[0].actions = vec![Action::Agent {
+        wf.tasks[0].actions = vec![Action::Agent {
             prompt: "do it".to_string(),
             background: false,
         }];
-        wf.steps[0].parallel = Some(vec![SubStep {
+        wf.tasks[0].agents = Some(vec![AgentTask {
             id: "sub1".to_string(),
             name: None,
             description: None,
@@ -189,15 +189,15 @@ mod tests {
 
     #[test]
     fn validate_collects_multiple_errors() {
-        use crate::config::types::{Action, SubStep};
+        use crate::config::types::{Action, AgentTask};
         let mut config = minimal_config();
         let wf = config.workflows.get_mut("wf").unwrap();
-        wf.steps[0].requires.push("missing".to_string());
-        wf.steps[0].actions = vec![Action::Agent {
+        wf.tasks[0].requires.push("missing".to_string());
+        wf.tasks[0].actions = vec![Action::Agent {
             prompt: "do it".to_string(),
             background: false,
         }];
-        wf.steps[0].parallel = Some(vec![SubStep {
+        wf.tasks[0].agents = Some(vec![AgentTask {
             id: "sub1".to_string(),
             name: None,
             description: None,
@@ -249,7 +249,7 @@ mod tests {
 workflows:
   wf:
     name: WF
-    steps:
+    tasks:
       - id: s
         name: S
         actions:
@@ -281,7 +281,7 @@ workflows:
 workflows:
   extra:
     name: Extra
-    steps:
+    tasks:
       - id: e1
         name: E1
 "#,
@@ -295,7 +295,7 @@ workflows:
 workflows:
   main:
     name: Main
-    steps:
+    tasks:
       - id: m1
         name: M1
 "#,
@@ -338,7 +338,7 @@ workflows: {}"#,
 workflows:
   wf:
     name: WF
-    steps:
+    tasks:
       - id: s1
         name: S1
 "#,

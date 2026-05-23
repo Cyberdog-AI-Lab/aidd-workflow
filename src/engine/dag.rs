@@ -2,29 +2,29 @@ use crate::config::types::Workflow;
 use crate::engine::state::{StepStatus, WorkflowState};
 
 /// Returns IDs of items that are currently executable.
-/// Normal steps return their step_id; parallel sub-steps return "parent_id/sub_id".
+/// Normal tasks return their task_id; agent sub-tasks return "parent_id/sub_id".
 pub fn executable_items(wf: &Workflow, state: &WorkflowState) -> Vec<String> {
     let mut items = Vec::new();
 
-    for step in &wf.steps {
-        let step_state = state.steps.get(&step.id);
-        let step_status = step_state
+    for task in &wf.tasks {
+        let task_state = state.tasks.get(&task.id);
+        let task_status = task_state
             .map(|s| &s.status)
             .unwrap_or(&StepStatus::Pending);
 
-        if matches!(step_status, StepStatus::Completed | StepStatus::Failed) {
+        if matches!(task_status, StepStatus::Completed | StepStatus::Failed) {
             continue;
         }
 
-        if !requires_met(wf, state, &step.requires) {
+        if !requires_met(wf, state, &task.requires) {
             continue;
         }
 
-        if let Some(parallel) = &step.parallel {
-            for sub in parallel {
-                let key = format!("{}/{}", step.id, sub.id);
+        if let Some(agents) = &task.agents {
+            for sub in agents {
+                let key = format!("{}/{}", task.id, sub.id);
                 let sub_status = state
-                    .steps
+                    .tasks
                     .get(&key)
                     .map(|s| &s.status)
                     .unwrap_or(&StepStatus::Pending);
@@ -32,9 +32,9 @@ pub fn executable_items(wf: &Workflow, state: &WorkflowState) -> Vec<String> {
                     continue;
                 }
                 let sub_requires_met = sub.requires.iter().all(|req| {
-                    let req_key = format!("{}/{}", step.id, req);
+                    let req_key = format!("{}/{}", task.id, req);
                     state
-                        .steps
+                        .tasks
                         .get(&req_key)
                         .map(|s| s.status == StepStatus::Completed)
                         .unwrap_or(false)
@@ -43,8 +43,8 @@ pub fn executable_items(wf: &Workflow, state: &WorkflowState) -> Vec<String> {
                     items.push(key);
                 }
             }
-        } else if matches!(step_status, StepStatus::Pending | StepStatus::InProgress) {
-            items.push(step.id.clone());
+        } else if matches!(task_status, StepStatus::Pending | StepStatus::InProgress) {
+            items.push(task.id.clone());
         }
     }
 
@@ -54,71 +54,71 @@ pub fn executable_items(wf: &Workflow, state: &WorkflowState) -> Vec<String> {
 fn requires_met(wf: &Workflow, state: &WorkflowState, requires: &[String]) -> bool {
     requires.iter().all(|req| {
         state
-            .steps
+            .tasks
             .get(req)
             .map(|s| s.status == StepStatus::Completed)
             .unwrap_or(false)
-            || wf.steps.iter().all(|s| s.id != *req) // unknown step: pass through
+            || wf.tasks.iter().all(|s| s.id != *req) // unknown task: pass through
     })
 }
 
 pub fn is_workflow_complete(wf: &Workflow, state: &WorkflowState) -> bool {
-    wf.steps.iter().all(|step| {
+    wf.tasks.iter().all(|task| {
         state
-            .steps
-            .get(&step.id)
+            .tasks
+            .get(&task.id)
             .map(|s| s.status == StepStatus::Completed)
             .unwrap_or(false)
     })
 }
 
-/// Returns the parent step ID if `step_id` is a parallel sub-step ("parent/sub").
-pub fn parent_of(step_id: &str) -> Option<&str> {
-    step_id.find('/').map(|i| &step_id[..i])
+/// Returns the parent task ID if `task_id` is an agent sub-task ("parent/sub").
+pub fn parent_of(task_id: &str) -> Option<&str> {
+    task_id.find('/').map(|i| &task_id[..i])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Step, SubStep, Workflow};
+    use crate::config::types::{AgentTask, Task, Workflow};
     use crate::engine::state::{StepStatus, WorkflowState};
 
     fn make_linear_workflow() -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![
-                Step {
+            tasks: vec![
+                Task {
                     id: "a".to_string(),
                     name: "A".to_string(),
-                    ..Step::default()
+                    ..Task::default()
                 },
-                Step {
+                Task {
                     id: "b".to_string(),
                     name: "B".to_string(),
                     requires: vec!["a".to_string()],
-                    ..Step::default()
+                    ..Task::default()
                 },
             ],
         }
     }
 
-    fn make_parallel_workflow() -> Workflow {
+    fn make_workflow_with_agents() -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "p".to_string(),
                 name: "Parallel".to_string(),
-                parallel: Some(vec![
-                    SubStep {
+                agents: Some(vec![
+                    AgentTask {
                         id: "x".to_string(),
                         name: None,
                         description: None,
                         actions: vec![],
                         requires: vec![],
                     },
-                    SubStep {
+                    AgentTask {
                         id: "y".to_string(),
                         name: None,
                         description: None,
@@ -126,13 +126,13 @@ mod tests {
                         requires: vec![],
                     },
                 ]),
-                ..Step::default()
+                ..Task::default()
             }],
         }
     }
 
     #[test]
-    fn first_step_is_executable_with_no_requires() {
+    fn first_task_is_executable_with_no_requires() {
         let wf = make_linear_workflow();
         let state = WorkflowState::new("test", &wf);
         let items = executable_items(&wf, &state);
@@ -140,26 +140,26 @@ mod tests {
     }
 
     #[test]
-    fn second_step_blocked_until_first_complete() {
+    fn second_task_blocked_until_first_complete() {
         let wf = make_linear_workflow();
         let mut state = WorkflowState::new("test", &wf);
-        state.steps.get_mut("a").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("a").unwrap().status = StepStatus::Completed;
         let items = executable_items(&wf, &state);
         assert_eq!(items, vec!["b"]);
     }
 
     #[test]
-    fn completed_step_not_in_executable_items() {
+    fn completed_task_not_in_executable_items() {
         let wf = make_linear_workflow();
         let mut state = WorkflowState::new("test", &wf);
-        state.steps.get_mut("a").unwrap().status = StepStatus::Completed;
-        state.steps.get_mut("b").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("a").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("b").unwrap().status = StepStatus::Completed;
         assert!(executable_items(&wf, &state).is_empty());
     }
 
     #[test]
-    fn parallel_sub_steps_both_returned() {
-        let wf = make_parallel_workflow();
+    fn agent_sub_tasks_both_returned() {
+        let wf = make_workflow_with_agents();
         let state = WorkflowState::new("test", &wf);
         let items = executable_items(&wf, &state);
         assert!(items.contains(&"p/x".to_string()));
@@ -167,42 +167,42 @@ mod tests {
     }
 
     #[test]
-    fn is_workflow_complete_requires_all_steps() {
+    fn is_workflow_complete_requires_all_tasks() {
         let wf = make_linear_workflow();
         let mut state = WorkflowState::new("test", &wf);
         assert!(!is_workflow_complete(&wf, &state));
-        state.steps.get_mut("a").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("a").unwrap().status = StepStatus::Completed;
         assert!(!is_workflow_complete(&wf, &state));
-        state.steps.get_mut("b").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("b").unwrap().status = StepStatus::Completed;
         assert!(is_workflow_complete(&wf, &state));
     }
 
     #[test]
-    fn parent_of_returns_parent_for_sub_step() {
+    fn parent_of_returns_parent_for_agent_sub_task() {
         assert_eq!(parent_of("parent/sub"), Some("parent"));
     }
 
     #[test]
-    fn parent_of_returns_none_for_normal_step() {
-        assert_eq!(parent_of("step1"), None);
+    fn parent_of_returns_none_for_normal_task() {
+        assert_eq!(parent_of("task1"), None);
     }
 
-    fn make_parallel_workflow_with_sub_requires() -> Workflow {
+    fn make_workflow_with_agent_requires() -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "p".to_string(),
                 name: "Parallel".to_string(),
-                parallel: Some(vec![
-                    SubStep {
+                agents: Some(vec![
+                    AgentTask {
                         id: "x".to_string(),
                         name: None,
                         description: None,
                         actions: vec![],
                         requires: vec![],
                     },
-                    SubStep {
+                    AgentTask {
                         id: "y".to_string(),
                         name: None,
                         description: None,
@@ -210,14 +210,14 @@ mod tests {
                         requires: vec!["x".to_string()],
                     },
                 ]),
-                ..Step::default()
+                ..Task::default()
             }],
         }
     }
 
     #[test]
-    fn sub_step_with_unmet_requires_not_executable() {
-        let wf = make_parallel_workflow_with_sub_requires();
+    fn agent_sub_task_with_unmet_requires_not_executable() {
+        let wf = make_workflow_with_agent_requires();
         let state = WorkflowState::new("test", &wf);
         let items = executable_items(&wf, &state);
         // Only x is executable; y requires x which is not complete
@@ -226,10 +226,10 @@ mod tests {
     }
 
     #[test]
-    fn sub_step_becomes_executable_after_requires_complete() {
-        let wf = make_parallel_workflow_with_sub_requires();
+    fn agent_sub_task_becomes_executable_after_requires_complete() {
+        let wf = make_workflow_with_agent_requires();
         let mut state = WorkflowState::new("test", &wf);
-        state.steps.get_mut("p/x").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("p/x").unwrap().status = StepStatus::Completed;
         let items = executable_items(&wf, &state);
         assert_eq!(items, vec!["p/y"]);
     }

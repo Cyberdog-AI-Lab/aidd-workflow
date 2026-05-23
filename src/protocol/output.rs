@@ -23,13 +23,12 @@ pub enum FlowStatus {
 
 #[derive(Debug, Serialize)]
 pub struct ActionItem {
-    pub step_id: String,
+    pub task_id: String,
     pub action_index: usize,
-    /// Display name of the step.
-    pub step_name: String,
-    /// When true, this item is part of a parallel block and may run concurrently
-    /// with other parallel=true items in the same response.
-    pub parallel: bool,
+    /// Display name of the task.
+    pub task_name: String,
+    /// When true, this item is part of an agents block and must be run as a sub-agent.
+    pub sub_agent: bool,
     #[serde(flatten)]
     pub action: ResolvedAction,
 }
@@ -49,7 +48,7 @@ pub enum ResolvedAction {
         workflow: String,
         inputs: HashMap<String, String>,
     },
-    /// Step with no actions and no parallel block; Claude works from the description.
+    /// Task with no actions and no agents block; Claude works from the description.
     Manual {
         description: String,
     },
@@ -57,7 +56,7 @@ pub enum ResolvedAction {
 
 #[derive(Debug, Serialize)]
 pub struct CompleteOutput {
-    pub step_id: String,
+    pub task_id: String,
     pub allowed: bool,
     pub reason: Option<String>,
     /// Next actions when allowed = true.
@@ -69,11 +68,11 @@ pub struct StatusOutput {
     pub workflow_id: String,
     pub workflow: String,
     pub started_at: String,
-    pub steps: Vec<StepStatusItem>,
+    pub tasks: Vec<TaskStatusItem>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct StepStatusItem {
+pub struct TaskStatusItem {
     pub id: String,
     pub name: String,
     pub status: String,
@@ -84,7 +83,7 @@ pub struct WorkflowListItem {
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
-    pub step_count: usize,
+    pub task_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,13 +126,13 @@ pub fn format_status_table(output: &StatusOutput) -> String {
 
     let mut table = Table::new();
     table.load_preset(UTF8_BORDERS_ONLY);
-    table.set_header(vec!["STEP ID", "NAME", "STATUS"]);
+    table.set_header(vec!["TASK ID", "NAME", "STATUS"]);
 
-    for step in &output.steps {
+    for task in &output.tasks {
         table.add_row(vec![
-            step.id.as_str(),
-            step.name.as_str(),
-            step.status.as_str(),
+            task.id.as_str(),
+            task.name.as_str(),
+            task.status.as_str(),
         ]);
     }
 
@@ -144,28 +143,28 @@ pub fn format_status_table(output: &StatusOutput) -> String {
 }
 
 pub fn build_status(state: &WorkflowState, wf: &Workflow) -> StatusOutput {
-    let mut steps = Vec::new();
-    for step in &wf.steps {
+    let mut tasks = Vec::new();
+    for task in &wf.tasks {
         let status = state
-            .steps
-            .get(&step.id)
+            .tasks
+            .get(&task.id)
             .map(|s| format!("{:?}", s.status).to_lowercase())
             .unwrap_or_else(|| "pending".to_string());
-        steps.push(StepStatusItem {
-            id: step.id.clone(),
-            name: step.name.clone(),
+        tasks.push(TaskStatusItem {
+            id: task.id.clone(),
+            name: task.name.clone(),
             status,
         });
-        if let Some(parallel) = &step.parallel {
-            for sub in parallel {
-                let key = format!("{}/{}", step.id, sub.id);
+        if let Some(agents) = &task.agents {
+            for sub in agents {
+                let key = format!("{}/{}", task.id, sub.id);
                 let sub_status = state
-                    .steps
+                    .tasks
                     .get(&key)
                     .map(|s| format!("{:?}", s.status).to_lowercase())
                     .unwrap_or_else(|| "pending".to_string());
                 let sub_name = sub.name.as_deref().unwrap_or(&sub.id).to_string();
-                steps.push(StepStatusItem {
+                tasks.push(TaskStatusItem {
                     id: key,
                     name: sub_name,
                     status: sub_status,
@@ -178,36 +177,36 @@ pub fn build_status(state: &WorkflowState, wf: &Workflow) -> StatusOutput {
         workflow_id: state.workflow_id.clone(),
         workflow: state.workflow.clone(),
         started_at: state.started_at.to_rfc3339(),
-        steps,
+        tasks,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Step, Workflow};
+    use crate::config::types::{Task, Workflow};
     use crate::engine::state::{StepStatus, WorkflowState};
 
     fn minimal_workflow() -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "s1".to_string(),
                 name: "S1".to_string(),
-                ..Step::default()
+                ..Task::default()
             }],
         }
     }
 
     #[test]
-    fn build_status_reflects_step_status() {
+    fn build_status_reflects_task_status() {
         let wf = minimal_workflow();
         let mut state = WorkflowState::new("test", &wf);
-        state.steps.get_mut("s1").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("s1").unwrap().status = StepStatus::Completed;
 
         let out = build_status(&state, &wf);
-        assert_eq!(out.steps[0].status, "completed");
+        assert_eq!(out.tasks[0].status, "completed");
     }
 
     #[test]
@@ -216,27 +215,27 @@ mod tests {
         let state = WorkflowState::new("test", &wf);
 
         let out = build_status(&state, &wf);
-        assert_eq!(out.steps[0].status, "pending");
+        assert_eq!(out.tasks[0].status, "pending");
     }
 
     #[test]
-    fn build_status_includes_parallel_sub_steps() {
-        use crate::config::types::SubStep;
+    fn build_status_includes_agent_sub_tasks() {
+        use crate::config::types::AgentTask;
         let wf = Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "p".to_string(),
                 name: "Parallel".to_string(),
-                parallel: Some(vec![
-                    SubStep {
+                agents: Some(vec![
+                    AgentTask {
                         id: "a".to_string(),
                         name: Some("A".to_string()),
                         description: None,
                         actions: vec![],
                         requires: vec![],
                     },
-                    SubStep {
+                    AgentTask {
                         id: "b".to_string(),
                         name: None,
                         description: None,
@@ -244,17 +243,17 @@ mod tests {
                         requires: vec![],
                     },
                 ]),
-                ..Step::default()
+                ..Task::default()
             }],
         };
         let state = WorkflowState::new("test", &wf);
         let out = build_status(&state, &wf);
-        // parent + 2 sub-steps
-        assert_eq!(out.steps.len(), 3);
-        assert_eq!(out.steps[1].id, "p/a");
-        assert_eq!(out.steps[1].name, "A");
-        assert_eq!(out.steps[2].id, "p/b");
-        assert_eq!(out.steps[2].name, "b");
+        // parent + 2 sub-agents
+        assert_eq!(out.tasks.len(), 3);
+        assert_eq!(out.tasks[1].id, "p/a");
+        assert_eq!(out.tasks[1].name, "A");
+        assert_eq!(out.tasks[2].id, "p/b");
+        assert_eq!(out.tasks[2].name, "b");
     }
 
     #[test]
@@ -291,7 +290,7 @@ mod tests {
         let state = WorkflowState::new("test", &wf);
         let status = build_status(&state, &wf);
         let table = format_status_table(&status);
-        assert!(table.contains("STEP ID"));
+        assert!(table.contains("TASK ID"));
         assert!(table.contains("STATUS"));
         assert!(table.contains("s1"));
         assert!(table.contains("pending"));

@@ -39,18 +39,18 @@ pub struct WorkflowState {
     pub workflow_id: String,
     pub workflow: String,
     pub started_at: DateTime<Utc>,
-    /// Keys: step_id for normal steps; "parent_id/sub_id" for parallel sub-steps.
-    pub steps: HashMap<String, StepState>,
+    /// Keys: task_id for normal tasks; "parent_id/sub_id" for agent sub-tasks.
+    pub tasks: HashMap<String, StepState>,
 }
 
 impl WorkflowState {
     pub fn new(workflow_name: &str, wf: &Workflow) -> Self {
-        let mut steps = HashMap::new();
-        for step in &wf.steps {
-            steps.insert(step.id.clone(), StepState::default());
-            if let Some(parallel) = &step.parallel {
-                for sub in parallel {
-                    steps.insert(format!("{}/{}", step.id, sub.id), StepState::default());
+        let mut tasks = HashMap::new();
+        for task in &wf.tasks {
+            tasks.insert(task.id.clone(), StepState::default());
+            if let Some(agents) = &task.agents {
+                for sub in agents {
+                    tasks.insert(format!("{}/{}", task.id, sub.id), StepState::default());
                 }
             }
         }
@@ -58,37 +58,37 @@ impl WorkflowState {
             workflow_id: Uuid::new_v4().to_string(),
             workflow: workflow_name.to_string(),
             started_at: Utc::now(),
-            steps,
+            tasks,
         }
     }
 
-    /// Derives parent step status from sub-step statuses and updates it in place.
-    pub fn sync_parallel_parent(&mut self, parent_id: &str, wf: &Workflow) -> Result<()> {
-        let parent_step = match wf.steps.iter().find(|s| s.id == parent_id) {
+    /// Derives parent task status from sub-agent statuses and updates it in place.
+    pub fn sync_agents_parent(&mut self, parent_id: &str, wf: &Workflow) -> Result<()> {
+        let parent_task = match wf.tasks.iter().find(|s| s.id == parent_id) {
             Some(s) => s,
             None => return Ok(()),
         };
-        let parallel = match &parent_step.parallel {
+        let agents = match &parent_task.agents {
             Some(p) => p,
             None => return Ok(()),
         };
 
-        let all_completed = parallel.iter().all(|sub| {
+        let all_completed = agents.iter().all(|sub| {
             let key = format!("{}/{}", parent_id, sub.id);
-            self.steps
+            self.tasks
                 .get(&key)
                 .map(|s| s.status == StepStatus::Completed)
                 .unwrap_or(false)
         });
-        let any_started = parallel.iter().any(|sub| {
+        let any_started = agents.iter().any(|sub| {
             let key = format!("{}/{}", parent_id, sub.id);
-            self.steps
+            self.tasks
                 .get(&key)
                 .map(|s| s.status != StepStatus::Pending)
                 .unwrap_or(false)
         });
 
-        let parent = self.steps.entry(parent_id.to_string()).or_default();
+        let parent = self.tasks.entry(parent_id.to_string()).or_default();
         if all_completed {
             parent.status = StepStatus::Completed;
             if parent.completed_at.is_none() {
@@ -105,24 +105,24 @@ impl WorkflowState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Step, SubStep, Workflow};
+    use crate::config::types::{AgentTask, Task, Workflow};
 
-    fn make_workflow_with_parallel() -> Workflow {
+    fn make_workflow_with_agents() -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "parent".to_string(),
                 name: "Parent".to_string(),
-                parallel: Some(vec![
-                    SubStep {
+                agents: Some(vec![
+                    AgentTask {
                         id: "a".to_string(),
                         name: None,
                         description: None,
                         actions: vec![],
                         requires: vec![],
                     },
-                    SubStep {
+                    AgentTask {
                         id: "b".to_string(),
                         name: None,
                         description: None,
@@ -130,41 +130,41 @@ mod tests {
                         requires: vec![],
                     },
                 ]),
-                ..Step::default()
+                ..Task::default()
             }],
         }
     }
 
     #[test]
-    fn new_initializes_all_step_keys() {
-        let wf = make_workflow_with_parallel();
+    fn new_initializes_all_task_keys() {
+        let wf = make_workflow_with_agents();
         let state = WorkflowState::new("test", &wf);
         assert!(!state.workflow_id.is_empty());
-        assert!(state.steps.contains_key("parent"));
-        assert!(state.steps.contains_key("parent/a"));
-        assert!(state.steps.contains_key("parent/b"));
+        assert!(state.tasks.contains_key("parent"));
+        assert!(state.tasks.contains_key("parent/a"));
+        assert!(state.tasks.contains_key("parent/b"));
     }
 
     #[test]
-    fn sync_parallel_parent_completes_when_all_subs_complete() {
-        let wf = make_workflow_with_parallel();
+    fn sync_agents_parent_completes_when_all_subs_complete() {
+        let wf = make_workflow_with_agents();
         let mut state = WorkflowState::new("test", &wf);
 
-        state.steps.get_mut("parent/a").unwrap().status = StepStatus::Completed;
-        state.steps.get_mut("parent/b").unwrap().status = StepStatus::Completed;
-        state.sync_parallel_parent("parent", &wf).unwrap();
+        state.tasks.get_mut("parent/a").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("parent/b").unwrap().status = StepStatus::Completed;
+        state.sync_agents_parent("parent", &wf).unwrap();
 
-        assert_eq!(state.steps["parent"].status, StepStatus::Completed);
+        assert_eq!(state.tasks["parent"].status, StepStatus::Completed);
     }
 
     #[test]
-    fn sync_parallel_parent_in_progress_when_partial() {
-        let wf = make_workflow_with_parallel();
+    fn sync_agents_parent_in_progress_when_partial() {
+        let wf = make_workflow_with_agents();
         let mut state = WorkflowState::new("test", &wf);
 
-        state.steps.get_mut("parent/a").unwrap().status = StepStatus::InProgress;
-        state.sync_parallel_parent("parent", &wf).unwrap();
+        state.tasks.get_mut("parent/a").unwrap().status = StepStatus::InProgress;
+        state.sync_agents_parent("parent", &wf).unwrap();
 
-        assert_eq!(state.steps["parent"].status, StepStatus::InProgress);
+        assert_eq!(state.tasks["parent"].status, StepStatus::InProgress);
     }
 }

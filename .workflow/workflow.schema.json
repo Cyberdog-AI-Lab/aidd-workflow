@@ -40,7 +40,7 @@
           ],
           "properties": {
             "background": {
-              "description": "When true, may run concurrently with other actions in the same step.",
+              "description": "When true, may run concurrently with other actions in the same task.",
               "default": false,
               "type": "boolean"
             },
@@ -107,6 +107,47 @@
         }
       ]
     },
+    "AgentTask": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "actions": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Action"
+          }
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique sub-agent identifier within the agents block. Pattern: `^[a-z][a-z0-9_-]*$`",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requires": {
+          "description": "IDs of other sub-agents within the same agents block that must complete first (checked at runtime).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "DenyRules": {
       "type": "object",
       "properties": {
@@ -129,8 +170,8 @@
       },
       "additionalProperties": false
     },
-    "Step": {
-      "description": "One step in a workflow. Holds either `actions` or `parallel`, never both. A step with neither is a manual step: Claude works from `description`.",
+    "Task": {
+      "description": "One task in a workflow. Holds either `actions` or `agents`, never both. A task with neither is a manual task: Claude works from `description`.",
       "type": "object",
       "required": [
         "id",
@@ -138,11 +179,21 @@
       ],
       "properties": {
         "actions": {
-          "description": "Actions to run automatically. Mutually exclusive with `parallel` (checked at runtime).",
+          "description": "Actions to run automatically. Mutually exclusive with `agents` (checked at runtime).",
           "default": [],
           "type": "array",
           "items": {
             "$ref": "#/definitions/Action"
+          }
+        },
+        "agents": {
+          "description": "Sub-agents to run concurrently. Mutually exclusive with `actions` (checked at runtime).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/AgentTask"
           }
         },
         "allow_files": {
@@ -172,66 +223,15 @@
           ]
         },
         "id": {
-          "description": "Unique step identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`",
+          "description": "Unique task identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`",
           "type": "string",
           "pattern": "^[a-z][a-z0-9_-]*$"
         },
         "name": {
           "type": "string"
         },
-        "parallel": {
-          "description": "Sub-steps to run in parallel. Mutually exclusive with `actions` (checked at runtime).",
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "$ref": "#/definitions/SubStep"
-          }
-        },
         "requires": {
-          "description": "IDs of steps that must complete before this step starts (checked at runtime).",
-          "default": [],
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "SubStep": {
-      "type": "object",
-      "required": [
-        "id"
-      ],
-      "properties": {
-        "actions": {
-          "default": [],
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/Action"
-          }
-        },
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "id": {
-          "description": "Unique sub-step identifier within the parallel block. Pattern: `^[a-z][a-z0-9_-]*$`",
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9_-]*$"
-        },
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "requires": {
-          "description": "IDs of other sub-steps within the same parallel block that must complete first (checked at runtime).",
+          "description": "IDs of tasks that must complete before this task starts (checked at runtime).",
           "default": [],
           "type": "array",
           "items": {
@@ -245,7 +245,7 @@
       "type": "object",
       "required": [
         "name",
-        "steps"
+        "tasks"
       ],
       "properties": {
         "description": {
@@ -257,11 +257,11 @@
         "name": {
           "type": "string"
         },
-        "steps": {
-          "description": "Steps to execute. At least one step is required (checked at runtime).",
+        "tasks": {
+          "description": "Tasks to execute. At least one task is required (checked at runtime).",
           "type": "array",
           "items": {
-            "$ref": "#/definitions/Step"
+            "$ref": "#/definitions/Task"
           },
           "minItems": 1
         }

@@ -22,28 +22,28 @@ pub struct Config {
 pub struct Workflow {
     pub name: String,
     pub description: Option<String>,
-    /// Steps to execute. At least one step is required (checked at runtime).
-    #[schemars(schema_with = "non_empty_steps")]
-    pub steps: Vec<Step>,
+    /// Tasks to execute. At least one task is required (checked at runtime).
+    #[schemars(schema_with = "non_empty_tasks")]
+    pub tasks: Vec<Task>,
 }
 
-/// One step in a workflow.
-/// Holds either `actions` or `parallel`, never both.
-/// A step with neither is a manual step: Claude works from `description`.
+/// One task in a workflow.
+/// Holds either `actions` or `agents`, never both.
+/// A task with neither is a manual task: Claude works from `description`.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Step {
-    /// Unique step identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`
+pub struct Task {
+    /// Unique task identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`
     #[schemars(schema_with = "kebab_id")]
     pub id: String,
     pub name: String,
     pub description: Option<String>,
-    /// Actions to run automatically. Mutually exclusive with `parallel` (checked at runtime).
+    /// Actions to run automatically. Mutually exclusive with `agents` (checked at runtime).
     #[serde(default)]
     pub actions: Vec<Action>,
-    /// Sub-steps to run in parallel. Mutually exclusive with `actions` (checked at runtime).
-    pub parallel: Option<Vec<SubStep>>,
-    /// IDs of steps that must complete before this step starts (checked at runtime).
+    /// Sub-agents to run concurrently. Mutually exclusive with `actions` (checked at runtime).
+    pub agents: Option<Vec<AgentTask>>,
+    /// IDs of tasks that must complete before this task starts (checked at runtime).
     #[serde(default)]
     pub requires: Vec<String>,
     /// File path patterns permitted for editing while InProgress (glob or /regex/).
@@ -67,15 +67,15 @@ pub struct DenyRules {
 
 #[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SubStep {
-    /// Unique sub-step identifier within the parallel block. Pattern: `^[a-z][a-z0-9_-]*$`
+pub struct AgentTask {
+    /// Unique sub-agent identifier within the agents block. Pattern: `^[a-z][a-z0-9_-]*$`
     #[schemars(schema_with = "kebab_id")]
     pub id: String,
     pub name: Option<String>,
     pub description: Option<String>,
     #[serde(default)]
     pub actions: Vec<Action>,
-    /// IDs of other sub-steps within the same parallel block that must complete first
+    /// IDs of other sub-agents within the same agents block that must complete first
     /// (checked at runtime).
     #[serde(default)]
     pub requires: Vec<String>,
@@ -86,7 +86,7 @@ pub struct SubStep {
 pub enum Action {
     Agent {
         prompt: String,
-        /// When true, may run concurrently with other actions in the same step.
+        /// When true, may run concurrently with other actions in the same task.
         #[serde(default)]
         background: bool,
     },
@@ -104,9 +104,9 @@ pub enum Action {
 
 // Custom schema functions for constraints that schemars cannot derive automatically.
 
-fn non_empty_steps(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+fn non_empty_tasks(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
     use schemars::schema::{ArrayValidation, SchemaObject, SingleOrVec};
-    let item = gen.subschema_for::<Step>();
+    let item = gen.subschema_for::<Task>();
     SchemaObject {
         instance_type: Some(schemars::schema::InstanceType::Array.into()),
         array: Some(Box::new(ArrayValidation {
@@ -137,34 +137,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn step_defaults_empty_requires_and_actions() {
-        let yaml = r#"id: step1
-name: Step 1"#;
-        let step: Step = serde_yaml::from_str(yaml).unwrap();
-        assert!(step.requires.is_empty());
-        assert!(step.actions.is_empty());
-        assert!(step.parallel.is_none());
-        assert!(step.allow_files.is_empty());
-        assert!(step.deny.is_none());
+    fn task_defaults_empty_requires_and_actions() {
+        let yaml = r#"id: task1
+name: Task 1"#;
+        let task: Task = serde_yaml::from_str(yaml).unwrap();
+        assert!(task.requires.is_empty());
+        assert!(task.actions.is_empty());
+        assert!(task.agents.is_none());
+        assert!(task.allow_files.is_empty());
+        assert!(task.deny.is_none());
     }
 
     #[test]
-    fn sub_step_requires_defaults_to_empty() {
+    fn agent_task_requires_defaults_to_empty() {
         let yaml = r#"id: sub1"#;
-        let sub: SubStep = serde_yaml::from_str(yaml).unwrap();
+        let sub: AgentTask = serde_yaml::from_str(yaml).unwrap();
         assert!(sub.requires.is_empty());
     }
 
     #[test]
-    fn sub_step_requires_parses_list() {
+    fn agent_task_requires_parses_list() {
         let yaml = r#"id: sub2
 requires: [sub1]"#;
-        let sub: SubStep = serde_yaml::from_str(yaml).unwrap();
+        let sub: AgentTask = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(sub.requires, vec!["sub1"]);
     }
 
     #[test]
-    fn step_parses_allow_files_and_deny() {
+    fn task_parses_allow_files_and_deny() {
         let yaml = r#"id: s
 name: S
 allow_files:
@@ -175,9 +175,9 @@ deny:
     - "docs/specs/**"
   commands:
     - "git push""#;
-        let step: Step = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(step.allow_files.len(), 2);
-        let deny = step.deny.unwrap();
+        let task: Task = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(task.allow_files.len(), 2);
+        let deny = task.deny.unwrap();
         assert_eq!(deny.files, vec!["docs/specs/**"]);
         assert_eq!(deny.commands, vec!["git push"]);
     }
@@ -200,11 +200,11 @@ workflows: {}"#;
     }
 
     #[test]
-    fn step_rejects_unknown_field() {
+    fn task_rejects_unknown_field() {
         let yaml = r#"id: s1
 name: S1
 unknown_key: value"#;
-        let result: Result<Step, _> = serde_yaml::from_str(yaml);
+        let result: Result<Task, _> = serde_yaml::from_str(yaml);
         assert!(result.is_err());
     }
 

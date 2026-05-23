@@ -18,7 +18,7 @@ workflows:
   bug-fix:
     name: バグ修正フロー
     description: バグを再現・特定し、修正・テストまで完走するフロー
-    steps:
+    tasks:
       - id: reproduce
         name: 再現確認
         description: バグを手元で再現し、再現手順（環境・操作・期待値・実際の挙動）を記録する
@@ -37,13 +37,13 @@ workflows:
 
       - id: complete
         name: 完了判定
-        description: すべてのステップが完了したことを確認し、作業を完了とマークする
+        description: すべてのタスクが完了したことを確認し、作業を完了とマークする
         requires: [implement]
 
   feature:
     name: 機能開発フロー
     description: 新機能を設計・実装・テストするフロー
-    steps:
+    tasks:
       - id: design
         name: 設計確認
         description: 実装方針・影響範囲・インターフェースを整理して記録する
@@ -70,7 +70,7 @@ workflows:
   release:
     name: リリースフロー
     description: 設計・実装・品質チェック（並列）まで完走するフロー
-    steps:
+    tasks:
       - id: design
         name: 設計確認
         description: 実装方針・影響範囲・インターフェースを整理して記録する
@@ -88,7 +88,7 @@ workflows:
       - id: quality-check
         name: 品質チェック（並列）
         requires: [implement]
-        parallel:
+        agents:
           - id: run-test
             name: テスト実行
             actions:

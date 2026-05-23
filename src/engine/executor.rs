@@ -20,16 +20,16 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
         if let Some(sep) = item_id.find('/') {
             let parent_id = &item_id[..sep];
             let sub_id = &item_id[sep + 1..];
-            let parent_step = wf.steps.iter().find(|s| s.id == parent_id).unwrap();
-            let parallel = parent_step.parallel.as_deref().unwrap_or(&[]);
-            if let Some(sub) = parallel.iter().find(|s| s.id == sub_id) {
-                let step_name = sub.name.as_deref().unwrap_or(sub_id);
+            let parent_task = wf.tasks.iter().find(|s| s.id == parent_id).unwrap();
+            let agents = parent_task.agents.as_deref().unwrap_or(&[]);
+            if let Some(sub) = agents.iter().find(|s| s.id == sub_id) {
+                let task_name = sub.name.as_deref().unwrap_or(sub_id);
                 if sub.actions.is_empty() {
                     actions.push(ActionItem {
-                        step_id: item_id.clone(),
+                        task_id: item_id.clone(),
                         action_index: 0,
-                        step_name: step_name.to_string(),
-                        parallel: true,
+                        task_name: task_name.to_string(),
+                        sub_agent: true,
                         action: ResolvedAction::Manual {
                             description: sub.description.clone().unwrap_or_default(),
                         },
@@ -37,34 +37,34 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
                 } else {
                     for (i, action) in sub.actions.iter().enumerate() {
                         actions.push(ActionItem {
-                            step_id: item_id.clone(),
+                            task_id: item_id.clone(),
                             action_index: i,
-                            step_name: step_name.to_string(),
-                            parallel: true,
+                            task_name: task_name.to_string(),
+                            sub_agent: true,
                             action: resolve(action, config),
                         });
                     }
                 }
             }
         } else {
-            let step = wf.steps.iter().find(|s| s.id == *item_id).unwrap();
-            if step.actions.is_empty() && step.parallel.is_none() {
+            let task = wf.tasks.iter().find(|s| s.id == *item_id).unwrap();
+            if task.actions.is_empty() && task.agents.is_none() {
                 actions.push(ActionItem {
-                    step_id: item_id.clone(),
+                    task_id: item_id.clone(),
                     action_index: 0,
-                    step_name: step.name.clone(),
-                    parallel: false,
+                    task_name: task.name.clone(),
+                    sub_agent: false,
                     action: ResolvedAction::Manual {
-                        description: step.description.clone().unwrap_or_default(),
+                        description: task.description.clone().unwrap_or_default(),
                     },
                 });
             } else {
-                for (i, action) in step.actions.iter().enumerate() {
+                for (i, action) in task.actions.iter().enumerate() {
                     actions.push(ActionItem {
-                        step_id: item_id.clone(),
+                        task_id: item_id.clone(),
                         action_index: i,
-                        step_name: step.name.clone(),
-                        parallel: false,
+                        task_name: task.name.clone(),
+                        sub_agent: false,
                         action: resolve(action, config),
                     });
                 }
@@ -112,7 +112,7 @@ pub fn resolve_template(s: &str, config: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Action, Config, Step, Workflow};
+    use crate::config::types::{Action, AgentTask, Config, Task, Workflow};
     use crate::engine::state::{StepStatus, WorkflowState};
     use std::collections::HashMap;
 
@@ -130,14 +130,14 @@ mod tests {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "run".to_string(),
                 name: "Run".to_string(),
                 actions: vec![Action::Agent {
                     prompt: "do the thing".to_string(),
                     background: false,
                 }],
-                ..Step::default()
+                ..Task::default()
             }],
         }
     }
@@ -146,11 +146,11 @@ mod tests {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "design".to_string(),
                 name: "Design".to_string(),
                 description: Some("Write the design doc".to_string()),
-                ..Step::default()
+                ..Task::default()
             }],
         }
     }
@@ -200,18 +200,17 @@ mod tests {
     }
 
     #[test]
-    fn parallel_sub_step_actions_have_parallel_true() {
-        use crate::config::types::SubStep;
+    fn agent_sub_task_actions_have_sub_agent_true() {
         let wf = Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
+            tasks: vec![Task {
                 id: "p".to_string(),
                 name: "Parallel".to_string(),
                 description: None,
                 actions: vec![],
-                parallel: Some(vec![
-                    SubStep {
+                agents: Some(vec![
+                    AgentTask {
                         id: "x".to_string(),
                         name: None,
                         description: None,
@@ -221,7 +220,7 @@ mod tests {
                         }],
                         requires: vec![],
                     },
-                    SubStep {
+                    AgentTask {
                         id: "y".to_string(),
                         name: None,
                         description: None,
@@ -232,7 +231,7 @@ mod tests {
                         requires: vec![],
                     },
                 ]),
-                ..Step::default()
+                ..Task::default()
             }],
         };
         let config = config_with_test_cmd("make test");
@@ -240,18 +239,18 @@ mod tests {
 
         let output = build_next(&wf, &state, &config);
         assert_eq!(output.actions.len(), 2);
-        assert!(output.actions[0].parallel);
-        assert!(output.actions[1].parallel);
+        assert!(output.actions[0].sub_agent);
+        assert!(output.actions[1].sub_agent);
     }
 
     #[test]
-    fn sequential_step_action_has_parallel_false() {
+    fn sequential_task_action_has_sub_agent_false() {
         let wf = workflow_with_agent_action();
         let config = config_with_test_cmd("make test");
         let state = WorkflowState::new("test", &wf);
 
         let output = build_next(&wf, &state, &config);
-        assert!(!output.actions[0].parallel);
+        assert!(!output.actions[0].sub_agent);
     }
 
     #[test]
@@ -259,7 +258,7 @@ mod tests {
         let wf = workflow_with_agent_action();
         let config = config_with_test_cmd("make test");
         let mut state = WorkflowState::new("test", &wf);
-        state.steps.get_mut("run").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("run").unwrap().status = StepStatus::Completed;
 
         let output = build_next(&wf, &state, &config);
         assert!(matches!(output.status, FlowStatus::Completed));

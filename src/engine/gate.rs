@@ -6,29 +6,29 @@ pub struct GateResult {
     pub reason: Option<String>,
 }
 
-/// Checks whether the given step can transition to Completed.
-pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult {
-    let (cfg_step_id, sub_id) = if let Some(idx) = step_id.find('/') {
-        (&step_id[..idx], Some(&step_id[idx + 1..]))
+/// Checks whether the given task can transition to Completed.
+pub fn check(wf: &Workflow, state: &WorkflowState, task_id: &str) -> GateResult {
+    let (cfg_task_id, sub_id) = if let Some(idx) = task_id.find('/') {
+        (&task_id[..idx], Some(&task_id[idx + 1..]))
     } else {
-        (step_id, None)
+        (task_id, None)
     };
 
-    let step = match wf.steps.iter().find(|s| s.id == cfg_step_id) {
+    let task = match wf.tasks.iter().find(|s| s.id == cfg_task_id) {
         Some(s) => s,
         None => {
             return GateResult {
                 allowed: false,
-                reason: Some(format!("step '{}' not found in config.yml", step_id)),
+                reason: Some(format!("task '{}' not found in config.yml", task_id)),
             }
         }
     };
 
-    // requires check (parallel sub-steps do not have their own requires)
+    // requires check (agent sub-tasks do not have their own requires)
     if sub_id.is_none() {
-        for req in &step.requires {
+        for req in &task.requires {
             let met = state
-                .steps
+                .tasks
                 .get(req)
                 .map(|s| s.status == StepStatus::Completed)
                 .unwrap_or(false);
@@ -36,8 +36,8 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult 
                 return GateResult {
                     allowed: false,
                     reason: Some(format!(
-                        "step '{}' cannot complete until '{}' is done",
-                        step_id, req
+                        "task '{}' cannot complete until '{}' is done",
+                        task_id, req
                     )),
                 };
             }
@@ -53,24 +53,24 @@ pub fn check(wf: &Workflow, state: &WorkflowState, step_id: &str) -> GateResult 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Step, Workflow};
+    use crate::config::types::{Task, Workflow};
     use crate::engine::state::{StepStatus, WorkflowState};
 
     fn workflow_with_requires() -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![
-                Step {
+            tasks: vec![
+                Task {
                     id: "a".to_string(),
                     name: "A".to_string(),
-                    ..Step::default()
+                    ..Task::default()
                 },
-                Step {
+                Task {
                     id: "b".to_string(),
                     name: "B".to_string(),
                     requires: vec!["a".to_string()],
-                    ..Step::default()
+                    ..Task::default()
                 },
             ],
         }
@@ -80,7 +80,7 @@ mod tests {
     fn gate_check_passes_without_unmet_requires() {
         let wf = workflow_with_requires();
         let mut state = WorkflowState::new("test", &wf);
-        state.steps.get_mut("a").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("a").unwrap().status = StepStatus::Completed;
 
         let result = check(&wf, &state, "b");
         assert!(result.allowed);
@@ -99,7 +99,7 @@ mod tests {
     fn requires_check_passes_when_dep_complete() {
         let wf = workflow_with_requires();
         let mut state = WorkflowState::new("test", &wf);
-        state.steps.get_mut("a").unwrap().status = StepStatus::Completed;
+        state.tasks.get_mut("a").unwrap().status = StepStatus::Completed;
 
         let result = check(&wf, &state, "b");
         assert!(result.allowed);

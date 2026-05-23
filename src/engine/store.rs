@@ -91,7 +91,7 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
         ))
     })?;
 
-    let mut steps: HashMap<String, StepState> = HashMap::new();
+    let mut tasks: HashMap<String, StepState> = HashMap::new();
     for row in step_rows {
         let (step_id, status_str, started_str, completed_str) = row?;
         let started_at_step = started_str
@@ -103,7 +103,7 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&Utc));
 
-        steps.insert(
+        tasks.insert(
             step_id,
             StepState {
                 status: str_to_status(&status_str),
@@ -134,7 +134,7 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
         let recorded_at = DateTime::parse_from_rfc3339(&recorded_at_str)
             .context("invalid recorded_at timestamp")?
             .with_timezone(&Utc);
-        let entry = steps.entry(step_id).or_default();
+        let entry = tasks.entry(step_id).or_default();
         entry.action_reports.push(ActionReport {
             action_index,
             action_type,
@@ -148,7 +148,7 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
         workflow_id: workflow_id.to_string(),
         workflow,
         started_at,
-        steps,
+        tasks,
     })
 }
 
@@ -214,17 +214,17 @@ pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
         ],
     )?;
 
-    for (step_id, step) in &state.steps {
+    for (task_id, task) in &state.tasks {
         conn.execute(
             "INSERT OR REPLACE INTO step_states
              (workflow_id, step_id, status, started_at, completed_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 state.workflow_id,
-                step_id,
-                status_to_str(&step.status),
-                step.started_at.map(|dt| dt.to_rfc3339()),
-                step.completed_at.map(|dt| dt.to_rfc3339()),
+                task_id,
+                status_to_str(&task.status),
+                task.started_at.map(|dt| dt.to_rfc3339()),
+                task.completed_at.map(|dt| dt.to_rfc3339()),
             ],
         )?;
     }
@@ -234,15 +234,15 @@ pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
         params![state.workflow_id],
     )?;
 
-    for (step_id, step) in &state.steps {
-        for report in &step.action_reports {
+    for (task_id, task) in &state.tasks {
+        for report in &task.action_reports {
             conn.execute(
                 "INSERT INTO action_reports
                  (workflow_id, step_id, action_index, action_type, exit_code, stdout, recorded_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     state.workflow_id,
-                    step_id,
+                    task_id,
                     report.action_index as i64,
                     report.action_type,
                     report.exit_code,
@@ -285,17 +285,17 @@ pub fn clear_state_by_id(cwd: &Path, workflow_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Step, Workflow};
+    use crate::config::types::{Task, Workflow};
     use tempfile::TempDir;
 
     fn minimal_workflow() -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
-            steps: vec![Step {
-                id: "step1".to_string(),
-                name: "Step 1".to_string(),
-                ..Step::default()
+            tasks: vec![Task {
+                id: "task1".to_string(),
+                name: "Task 1".to_string(),
+                ..Task::default()
             }],
         }
     }
@@ -372,9 +372,9 @@ mod tests {
 
         let wf = minimal_workflow();
         let mut state = WorkflowState::new("test", &wf);
-        let step = state.steps.entry("step1".to_string()).or_default();
-        step.status = StepStatus::InProgress;
-        step.action_reports.push(ActionReport {
+        let task = state.tasks.entry("task1".to_string()).or_default();
+        task.status = StepStatus::InProgress;
+        task.action_reports.push(ActionReport {
             action_index: 0,
             action_type: "run".to_string(),
             exit_code: Some(0),
@@ -384,7 +384,7 @@ mod tests {
 
         save_state(cwd, &state).unwrap();
         let loaded = load_state(cwd).unwrap().unwrap();
-        let reports = &loaded.steps["step1"].action_reports;
+        let reports = &loaded.tasks["task1"].action_reports;
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].action_type, "run");
         assert_eq!(reports[0].stdout.as_deref(), Some("ok"));
