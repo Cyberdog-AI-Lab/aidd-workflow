@@ -198,13 +198,16 @@ pub fn load_state_by_id(cwd: &Path, workflow_id: &str) -> Result<Option<Workflow
     Ok(Some(load_state_from_db(&conn, workflow_id)?))
 }
 
-/// Saves (upserts) the workflow state to SQLite.
+/// Saves (upserts) the workflow state to SQLite within a single transaction.
 /// Does NOT overwrite `status` on update — use `set_workflow_status` to change it.
+/// All writes are atomic: a crash mid-save leaves the previous state intact.
 pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
-    let conn = open_db(cwd)?;
+    let mut conn = open_db(cwd)?;
     let cwd_str = cwd.to_string_lossy();
 
-    conn.execute(
+    let tx = conn.transaction()?;
+
+    tx.execute(
         "INSERT OR REPLACE INTO workflow_runs (workflow_id, cwd, workflow, status, started_at)
          VALUES (?1, ?2, ?3, 'active', ?4)
          ON CONFLICT(workflow_id) DO UPDATE SET
@@ -219,7 +222,7 @@ pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
     )?;
 
     for (task_id, task) in &state.tasks {
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO step_states
              (workflow_id, step_id, status, started_at, completed_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -233,14 +236,14 @@ pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
         )?;
     }
 
-    conn.execute(
+    tx.execute(
         "DELETE FROM action_reports WHERE workflow_id = ?1",
         params![state.workflow_id],
     )?;
 
     for (task_id, task) in &state.tasks {
         for report in &task.action_reports {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO action_reports
                  (workflow_id, step_id, action_index, action_type, exit_code, stdout, recorded_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -257,6 +260,7 @@ pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
         }
     }
 
+    tx.commit()?;
     Ok(())
 }
 

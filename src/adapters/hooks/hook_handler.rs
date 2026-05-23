@@ -70,22 +70,8 @@ pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
             continue;
         }
 
-        // outputs: non-empty list means the file must match at least one pattern.
-        if !task.outputs.is_empty() {
-            let allowed = task.outputs.iter().any(|p| matches_pattern(p, &rel_path));
-            if !allowed {
-                let decision = serde_json::json!({
-                    "decision": "ask",
-                    "reason": format!(
-                        "[{}] '{}' is outside outputs for task '{}'",
-                        task.id, rel_path, task.id
-                    )
-                });
-                return Ok(Some(decision.to_string()));
-            }
-        }
-
-        // deny.files: any matching pattern is an explicit block.
+        // deny.files is checked first so that an explicit block always wins,
+        // even when the file is also outside the outputs allowlist.
         if let Some(deny) = &task.deny {
             for pattern in &deny.files {
                 if matches_pattern(pattern, &rel_path) {
@@ -98,6 +84,21 @@ pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
                     });
                     return Ok(Some(decision.to_string()));
                 }
+            }
+        }
+
+        // outputs: non-empty list means the file must match at least one pattern.
+        if !task.outputs.is_empty() {
+            let allowed = task.outputs.iter().any(|p| matches_pattern(p, &rel_path));
+            if !allowed {
+                let decision = serde_json::json!({
+                    "decision": "ask",
+                    "reason": format!(
+                        "[{}] '{}' is outside outputs for task '{}'",
+                        task.id, rel_path, task.id
+                    )
+                });
+                return Ok(Some(decision.to_string()));
             }
         }
     }
@@ -394,6 +395,45 @@ mod tests {
         });
         let result = handle_pre_bash(dir.path(), &json.to_string()).unwrap();
         assert!(result.is_none(), "expected allow but got: {:?}", result);
+    }
+
+    /// deny.files must block even when the file is also outside the outputs allowlist.
+    /// Previously the outputs check returned "ask" before deny was evaluated.
+    #[test]
+    fn pre_edit_blocks_deny_even_when_outside_outputs() {
+        let dir = tempdir().unwrap();
+        setup_workflow_dir(dir.path());
+
+        write_config(
+            dir.path(),
+            "vars: {}\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        prompt: \"do it\"\n        outputs:\n          - \"src/**\"\n        deny:\n          files:\n            - \"docs/secrets/**\"\n",
+        );
+
+        let wf_for_state = Workflow {
+            name: "test".to_string(),
+            description: None,
+            tasks: vec![Task {
+                id: "impl".to_string(),
+                outputs: vec!["src/**".to_string()],
+                deny: Some(DenyRules {
+                    files: vec!["docs/secrets/**".to_string()],
+                    commands: vec![],
+                }),
+                ..Task::default()
+            }],
+        };
+        let state = active_state("test", "impl", &wf_for_state);
+        save_state(dir.path(), &state).unwrap();
+
+        // File is outside outputs AND matches deny — must be "block", not "ask".
+        let file_path = dir.path().join("docs/secrets/api-keys.md");
+        let json = serde_json::json!({
+            "cwd": dir.path().to_str().unwrap(),
+            "tool_input": {"file_path": file_path.to_str().unwrap()}
+        });
+        let result = handle_pre_edit(dir.path(), &json.to_string()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(v["decision"].as_str().unwrap(), "block");
     }
 
     // Suppress unused import warning for HashMap in this test module.

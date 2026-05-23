@@ -12,7 +12,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use adapters::hooks::hook_handler;
-use config::loader::{load_config, validate as validate_config};
+use config::loader::{load_and_merge_config, load_config, validate as validate_config};
 use engine::state::{ActionReport, StepStatus, WorkflowState};
 use engine::store::{
     clear_state_by_id, get_workflow_status, load_state, load_state_by_id, save_state,
@@ -189,6 +189,17 @@ fn cmd_report(cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
         .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
+    // Reject reports for task IDs that were never initialised in the workflow state.
+    // state.tasks is pre-populated from wf.tasks by WorkflowState::new, so an unknown
+    // ID means either a typo or a stale task from a different workflow.
+    if !state.tasks.contains_key(&input.task_id) {
+        anyhow::bail!(
+            "unknown task_id '{}' for workflow '{}'",
+            input.task_id,
+            state.workflow
+        );
+    }
+
     {
         let s = state.tasks.entry(input.task_id.clone()).or_default();
         if s.status == StepStatus::Pending {
@@ -306,6 +317,25 @@ fn cmd_reject(
         );
     }
 
+    // Validate that the given task_id exists in the workflow config.
+    if !wf.tasks.iter().any(|t| t.id == task_id) {
+        anyhow::bail!(
+            "task '{}' not found in workflow '{}'",
+            task_id,
+            state.workflow
+        );
+    }
+    // Only Completed tasks can be rejected (the approval gate fires after completion).
+    if !matches!(
+        state.tasks.get(task_id).map(|s| &s.status),
+        Some(StepStatus::Completed)
+    ) {
+        anyhow::bail!(
+            "task '{}' is not in Completed state; cannot reject",
+            task_id
+        );
+    }
+
     // Reset task to InProgress and record rejection reason.
     {
         let s = state.tasks.entry(task_id.to_string()).or_default();
@@ -384,30 +414,29 @@ fn cmd_status(cwd: &Path, format: &str, workflow_id: Option<&str>) -> Result<Str
 fn cmd_validate(cwd: &Path, format: &str) -> Result<String> {
     let path = cwd.join(".workflow/config.yml");
 
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => {
-            let out = ValidateOutput {
-                valid: false,
-                workflow_count: 0,
-                vars: vec![],
-                errors: vec![format!(
-                    ".workflow/config.yml not found: {}",
-                    path.display()
-                )],
-            };
-            return Ok(render_validate(&out, format));
-        }
-    };
+    if !path.exists() {
+        let out = ValidateOutput {
+            valid: false,
+            workflow_count: 0,
+            vars: vec![],
+            errors: vec![format!(
+                ".workflow/config.yml not found: {}",
+                path.display()
+            )],
+        };
+        return Ok(render_validate(&out, format));
+    }
 
-    let config: crate::config::types::Config = match serde_yaml::from_str(&content) {
+    // Use load_and_merge_config so that imported files are included before validation.
+    // This prevents false positives/negatives from cross-import requires references.
+    let config = match load_and_merge_config(cwd) {
         Ok(c) => c,
         Err(e) => {
             let out = ValidateOutput {
                 valid: false,
                 workflow_count: 0,
                 vars: vec![],
-                errors: vec![format!("YAML parse error: {}", e)],
+                errors: vec![e.to_string()],
             };
             return Ok(render_validate(&out, format));
         }

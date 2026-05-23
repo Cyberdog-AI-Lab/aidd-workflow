@@ -1,7 +1,11 @@
 use super::types::Config;
 use anyhow::{Context, Result};
+use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::LazyLock;
+
+static TASK_ID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9_-]*$").unwrap());
 
 /// Accumulates all validation errors found in a config, rather than stopping at the first.
 #[derive(Debug)]
@@ -23,11 +27,18 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-/// Loads and merges config from `.workflow/config.yml` and any `imports`.
-/// Validation runs only on the fully merged config.
-pub fn load_config(cwd: &Path) -> Result<Config> {
+/// Loads and merges config from `.workflow/config.yml` and any `imports`,
+/// but does NOT run validation. Use this when you need the merged config
+/// before calling `validate()` separately (e.g. to collect detailed errors).
+pub fn load_and_merge_config(cwd: &Path) -> Result<Config> {
     let root = cwd.join(".workflow/config.yml");
-    let config = load_config_recursive(&root, cwd, &mut HashSet::new())?;
+    load_config_recursive(&root, cwd, &mut HashSet::new())
+}
+
+/// Loads, merges, and validates config from `.workflow/config.yml` and any `imports`.
+/// Returns an error if the file is missing, unparseable, or fails validation.
+pub fn load_config(cwd: &Path) -> Result<Config> {
+    let config = load_and_merge_config(cwd)?;
     validate(&config).map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(config)
 }
@@ -41,6 +52,8 @@ fn load_config_recursive(
         .canonicalize()
         .with_context(|| format!("config file not found: {}", path.display()))?;
 
+    // `visited` tracks the current DFS stack, not globally-visited nodes.
+    // This allows diamond imports (A→B→D, A→C→D) while still detecting true cycles.
     if !visited.insert(canonical.clone()) {
         anyhow::bail!("circular import detected: {}", path.display());
     }
@@ -53,12 +66,30 @@ fn load_config_recursive(
 
     // Resolve and merge imports before returning; validate only at the top level.
     let imports = std::mem::take(&mut config.imports);
+
+    // Compute the canonical .workflow/ directory once for path-traversal checks.
+    let workflow_dir = base
+        .join(".workflow")
+        .canonicalize()
+        .with_context(|| format!("cannot resolve .workflow/ under {}", base.display()))?;
+
     for import_path in &imports {
         let abs = base.join(".workflow").join(import_path);
+
+        // Reject imports that escape the .workflow/ directory (path traversal).
+        let import_canonical = abs
+            .canonicalize()
+            .with_context(|| format!("import not found: {}", import_path))?;
+        if !import_canonical.starts_with(&workflow_dir) {
+            anyhow::bail!("import '{}' escapes .workflow/ directory", import_path);
+        }
+
         let child = load_config_recursive(&abs, base, visited)?;
         merge_into(&mut config, child);
     }
 
+    // Pop this node from the DFS stack so sibling branches can import the same file.
+    visited.remove(&canonical);
     Ok(config)
 }
 
@@ -79,9 +110,30 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
         if wf.tasks.is_empty() {
             errors.push(format!("workflow '{}' has no tasks", slug));
         }
+
+        // Detect duplicate task IDs (HashSet deduplicates; size mismatch reveals duplicates).
         let ids: HashSet<&str> = wf.tasks.iter().map(|s| s.id.as_str()).collect();
+        if ids.len() != wf.tasks.len() {
+            let mut seen: HashSet<&str> = HashSet::new();
+            for task in &wf.tasks {
+                if !seen.insert(task.id.as_str()) {
+                    errors.push(format!(
+                        "workflow '{}': duplicate task id '{}'",
+                        slug, task.id
+                    ));
+                }
+            }
+        }
 
         for task in &wf.tasks {
+            // Task ID must match the required pattern (must not contain '/' or upper-case).
+            if !TASK_ID_RE.is_match(&task.id) {
+                errors.push(format!(
+                    "task '{}' in workflow '{}': id must match ^[a-z][a-z0-9_-]*$",
+                    task.id, slug
+                ));
+            }
+
             // prompt/skills and agents are mutually exclusive.
             if (task.prompt.is_some() || !task.skills.is_empty()) && !task.agents.is_empty() {
                 errors.push(format!(
@@ -347,5 +399,127 @@ workflows:
         let result = load_config(dir.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("circular"));
+    }
+
+    /// Diamond import: A→[B,C], B→shared, C→shared must succeed (not be treated as circular).
+    #[test]
+    fn load_config_resolves_diamond_imports() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let wf_dir = dir.path().join(".workflow");
+        std::fs::create_dir_all(&wf_dir).unwrap();
+
+        std::fs::write(
+            wf_dir.join("shared.yml"),
+            r#"vars:
+  shared_var: shared_value
+workflows: {}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            wf_dir.join("a.yml"),
+            r#"imports:
+  - shared.yml
+workflows: {}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            wf_dir.join("b.yml"),
+            r#"imports:
+  - shared.yml
+workflows: {}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            wf_dir.join("config.yml"),
+            r#"imports:
+  - a.yml
+  - b.yml
+workflows:
+  wf:
+    name: WF
+    tasks:
+      - id: s1
+        task: Step 1
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(dir.path()).unwrap();
+        assert!(config.vars.contains_key("shared_var"));
+        assert!(config.workflows.contains_key("wf"));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_task_ids() {
+        let mut config = minimal_config();
+        let wf = config.workflows.get_mut("wf").unwrap();
+        wf.tasks.push(Task {
+            id: "task1".to_string(), // duplicate of the existing "task1"
+            task: Some("Duplicate task".to_string()),
+            ..Task::default()
+        });
+        let err = validate(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate task id"),
+            "expected duplicate task id error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_task_id_with_slash() {
+        let mut config = minimal_config();
+        let wf = config.workflows.get_mut("wf").unwrap();
+        wf.tasks[0].id = "my/task".to_string();
+        let err = validate(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("id must match"),
+            "expected pattern error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_task_id_uppercase() {
+        let mut config = minimal_config();
+        let wf = config.workflows.get_mut("wf").unwrap();
+        wf.tasks[0].id = "MyTask".to_string();
+        let err = validate(&config).unwrap_err();
+        assert!(err.to_string().contains("id must match"));
+    }
+
+    #[test]
+    fn load_config_rejects_path_traversal_import() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let wf_dir = dir.path().join(".workflow");
+        std::fs::create_dir_all(&wf_dir).unwrap();
+
+        // Create a file outside .workflow/ that could be targeted.
+        std::fs::write(dir.path().join("outside.yml"), "workflows: {}").unwrap();
+
+        std::fs::write(
+            wf_dir.join("config.yml"),
+            r#"imports:
+  - ../outside.yml
+workflows:
+  wf:
+    name: WF
+    tasks:
+      - id: s1
+        task: Step 1
+"#,
+        )
+        .unwrap();
+
+        let result = load_config(dir.path());
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("escapes"),
+            "expected path traversal error"
+        );
     }
 }

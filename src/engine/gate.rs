@@ -27,8 +27,17 @@ pub fn check(wf: &Workflow, state: &WorkflowState, task_id: &str) -> GateResult 
         }
     };
 
-    // Sub-agent completions skip all gate checks (no requires, no nested agents).
-    if sub_id.is_some() {
+    // Sub-agent completions: verify the agent name is registered in task.agents.
+    if let Some(sub) = sub_id {
+        if !task.agents.iter().any(|a| a == sub) {
+            return GateResult {
+                allowed: false,
+                reason: Some(format!(
+                    "agent '{}' is not registered in task '{}'",
+                    sub, cfg_task_id
+                )),
+            };
+        }
         return GateResult {
             allowed: true,
             reason: None,
@@ -162,11 +171,21 @@ mod tests {
     }
 
     #[test]
-    fn gate_always_passes_for_agent_sub_task() {
+    fn gate_passes_for_registered_agent_sub_task() {
         let wf = workflow_with_agents();
         let state = WorkflowState::new("test", &wf);
-        // Sub-agent completes without any gate check.
+        // "run-test" is listed in task.agents — gate must allow it.
         let result = check(&wf, &state, "parallel/run-test");
         assert!(result.allowed);
+    }
+
+    #[test]
+    fn gate_blocks_unregistered_agent_sub_task() {
+        let wf = workflow_with_agents();
+        let state = WorkflowState::new("test", &wf);
+        // "phantom" is not listed in task.agents — gate must reject it.
+        let result = check(&wf, &state, "parallel/phantom");
+        assert!(!result.allowed);
+        assert!(result.reason.unwrap().contains("phantom"));
     }
 }
