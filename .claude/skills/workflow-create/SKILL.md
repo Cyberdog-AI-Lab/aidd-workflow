@@ -6,7 +6,7 @@ description: >
   「config.yml を作りたい」「config.yml が存在しない」「ワークフローを登録したい」
   「カスタムフローを追加して」「デプロイフローを作りたい」など、
   ワークフローを新規作成・追加したいときは必ずこのスキルを使うこと。
-  /workflow-orchestrator から「config.yml が見つかりません」と案内された直後も使う。
+  /workflow-runner から「config.yml が見つかりません」と案内された直後も使う。
 ---
 
 # Workflow Create スキル
@@ -124,7 +124,7 @@ gate タスクで使うコマンドを定義する。
 
 ```yaml
 # yaml-language-server: $schema=./workflow.schema.json
-# workflow-orchestrator 設定ファイル
+# workflow-runner 設定ファイル
 
 vars:
   test: {テストコマンド}
@@ -152,7 +152,7 @@ workflows:
 ✅ ワークフロー `{slug}` を config.yml に追記しました。
 
 実行するには：
-  /workflow-orchestrator {slug}
+  /workflow-runner {slug}
 ```
 
 ---

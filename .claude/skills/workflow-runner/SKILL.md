@@ -1,5 +1,5 @@
 ---
-name: workflow-orchestrator
+name: workflow-runner
 description: >
   プロジェクトの .workflow/config.yml に定義されたワークフローを Tasks API で管理・実行するスキル。
   テストスキップ・ルール忘れ・多段タスクの中断など「Claude が守るべき手順を守らない」問題を

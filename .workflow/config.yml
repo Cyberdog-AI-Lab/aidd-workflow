@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=./workflow.schema.json
-# workflow-orchestrator 設定ファイル
+# workflow-runner 設定ファイル
 # このファイルをプロジェクトルートの .workflow/config.yml に置く
 
 # 他ファイルへの分割（imports: で複数ファイルに切り出せる）

@@ -101,7 +101,7 @@ aidd-workflow/
 └── .claude/
     ├── hooks/
     │   └── post-edit-rust-checks.sh     .rs 編集後に fmt / lint / test を自動実行
-    └── skills/workflow-orchestrator/    workflow-runner を呼ぶ薄いブリッジ
+    └── skills/workflow-runner/          workflow-runner を呼ぶ薄いブリッジ
 ```
 
 ---

@@ -1,7 +1,7 @@
 {
 	"$schema": "http://json-schema.org/draft-07/schema#",
 	"title": "Config",
-	"description": "Root config.yml or any import file for workflow-orchestrator. All top-level keys are optional in individual files; they are merged before validation.",
+	"description": "Root config.yml or any import file for workflow-runner. All top-level keys are optional in individual files; they are merged before validation.",
 	"type": "object",
 	"properties": {
 		"vars": {
