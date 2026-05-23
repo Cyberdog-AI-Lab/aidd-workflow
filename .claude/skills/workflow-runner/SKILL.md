@@ -10,7 +10,7 @@ description: >
   必ずこのスキルを使うこと。ユーザーが「ワークフロー」「フロー」「手順通りに」と言ったら迷わず使う。
 ---
 
-# Workflow Orchestrator スキル（v2）
+# Workflow Runner スキル
 
 `workflow-runner` バイナリが判断ロジックを持ち、このスキルはアクションを dispatch するだけ。
 各タスクのゲートは Hooks + `workflow-runner` が自動で検証する。

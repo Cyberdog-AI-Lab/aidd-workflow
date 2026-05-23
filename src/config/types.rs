@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Root config.yml or any import file for workflow-orchestrator.
+/// Root config.yml or any import file for workflow-runner.
 /// All top-level keys are optional in individual files; they are merged before validation.
 #[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
 #[serde(deny_unknown_fields)]

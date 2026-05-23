@@ -1,4 +1,4 @@
-# workflow-orchestrator フェーズ2実験用 Makefile
+# workflow-runner フェーズ2実験用 Makefile
 
 .PHONY: test lint build fmt fmt-check
 
