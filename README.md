@@ -86,18 +86,6 @@ commands:
 ./target/debug/workflow-runner update                         # settings.json の hook 設定を更新
 ```
 
-### standalone アダプターで自律実行（AI ツール不要）
-
-`exec-step` を使うと `agent` アクションを workflow-runner が直接実行する。
-`agent` アクションは Claude Code Channels（`claude -p`）経由で実行されるため、
-`ANTHROPIC_API_KEY` は不要。`claude` CLI が認証済みであること。
-
-```bash
-./target/debug/workflow-runner --adapter standalone start feature
-./target/debug/workflow-runner --adapter standalone exec-step implement
-./target/debug/workflow-runner --adapter standalone exec-step test
-```
-
 ## ワークフローの追加
 
 ```
@@ -179,12 +167,10 @@ src/                             # workflow-runner（Rust）
 ├── config/                      YAML パース・型定義・imports 解決
 ├── engine/                      DAG 評価・SQLite 状態管理・gate/guards チェック
 ├── adapters/
-│   ├── hooks/                   Claude Code フック処理（providers 経由）
-│   └── standalone/              run_command / Claude Code Channels
+│   └── hooks/                   Claude Code フック処理（providers 経由）
 ├── providers/
 │   └── claude_code/             Claude Code hook JSON → 型安全な構造体
-│       └── channels/            `claude -p` 経由の Claude Code Channels 呼び出し
-├── infra/                       settings.json 生成（init/update コマンド）
+├── infra/                       settings.json 生成・シェルコマンド実行（Shell）
 └── protocol/                    JSON 入出力型・テーブルフォーマッター
 
 .github/workflows/
@@ -208,9 +194,8 @@ src/                             # workflow-runner（Rust）
 ## 依存
 
 - Rust（`cargo build` でバイナリをビルド）
-- `claude` CLI（standalone アダプターで `agent` アクションを使う場合）：Claude Code Channels 経由で実行するため認証済みであること
 
 ## ドキュメント
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — アーキテクチャ詳細（v5 目標設計）
-- [PLAN.md](./PLAN.md) — v5 実装計画（4フェーズ）
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — アーキテクチャ詳細
+- [PLAN.md](./PLAN.md) — v5 実装計画（Phase 1–4 完了、Phase 5 計画中）
