@@ -39,8 +39,8 @@ pub struct Task {
     /// Unique task identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`
     #[schemars(schema_with = "kebab_id")]
     pub id: String,
-    /// Human-readable description of the task. Required for manual tasks.
-    pub description: Option<String>,
+    /// Concise task name shown in the task list. Required for manual tasks.
+    pub task: Option<String>,
     /// Prompt sent to the agent. Supports `{{vars.<key>}}` interpolation.
     /// Mutually exclusive with `agents`.
     pub prompt: Option<String>,
@@ -122,13 +122,13 @@ mod tests {
         assert!(task.deny.is_none());
         assert!(!task.approval);
         assert!(task.prompt.is_none());
-        assert!(task.description.is_none());
+        assert!(task.task.is_none());
     }
 
     #[test]
     fn task_parses_prompt_and_skills() {
         let yaml = r#"id: impl
-description: Implement the feature
+task: Implement the feature
 prompt: "Do the implementation"
 skills:
   - security-review
@@ -137,7 +137,7 @@ approval: true"#;
         assert_eq!(task.prompt.as_deref(), Some("Do the implementation"));
         assert_eq!(task.skills, vec!["security-review"]);
         assert!(task.approval);
-        assert_eq!(task.description.as_deref(), Some("Implement the feature"));
+        assert_eq!(task.task.as_deref(), Some("Implement the feature"));
     }
 
     #[test]

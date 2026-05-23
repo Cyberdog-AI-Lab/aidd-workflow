@@ -91,12 +91,12 @@ mod tests {
             tasks: vec![
                 Task {
                     id: "a".to_string(),
-                    description: Some("A".to_string()),
+                    task: Some("A".to_string()),
                     ..Task::default()
                 },
                 Task {
                     id: "b".to_string(),
-                    description: Some("B".to_string()),
+                    task: Some("B".to_string()),
                     requires: vec!["a".to_string()],
                     ..Task::default()
                 },

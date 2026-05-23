@@ -90,12 +90,12 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
                 ));
             }
 
-            // Manual tasks (no prompt, skills, or agents) require a description.
+            // Manual tasks (no prompt, skills, or agents) require a task name.
             let is_manual =
                 task.prompt.is_none() && task.skills.is_empty() && task.agents.is_empty();
-            if is_manual && task.description.is_none() {
+            if is_manual && task.task.is_none() {
                 errors.push(format!(
-                    "task '{}' in workflow '{}': manual task requires 'description'",
+                    "task '{}' in workflow '{}': manual task requires 'task'",
                     task.id, slug
                 ));
             }
@@ -141,7 +141,7 @@ mod tests {
     fn minimal_config() -> Config {
         let task = Task {
             id: "task1".to_string(),
-            description: Some("Do task 1".to_string()),
+            task: Some("Do task 1".to_string()),
             ..Task::default()
         };
         let mut workflows = HashMap::new();
@@ -200,30 +200,28 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_manual_task_without_description() {
+    fn validate_rejects_manual_task_without_task_name() {
         let mut config = minimal_config();
         let wf = config.workflows.get_mut("wf").unwrap();
-        wf.tasks[0].description = None; // remove description from manual task
+        wf.tasks[0].task = None; // remove task name from manual task
         let err = validate(&config).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("manual task requires 'description'"));
+        assert!(err.to_string().contains("manual task requires 'task'"));
     }
 
     #[test]
-    fn validate_accepts_prompt_task_without_description() {
+    fn validate_accepts_prompt_task_without_task_name() {
         let mut config = minimal_config();
         let wf = config.workflows.get_mut("wf").unwrap();
-        wf.tasks[0].description = None;
+        wf.tasks[0].task = None;
         wf.tasks[0].prompt = Some("Do something".to_string());
         assert!(validate(&config).is_ok());
     }
 
     #[test]
-    fn validate_accepts_agents_task_without_description() {
+    fn validate_accepts_agents_task_without_task_name() {
         let mut config = minimal_config();
         let wf = config.workflows.get_mut("wf").unwrap();
-        wf.tasks[0].description = None;
+        wf.tasks[0].task = None;
         wf.tasks[0].agents = vec!["run-test".to_string()];
         assert!(validate(&config).is_ok());
     }
@@ -285,7 +283,7 @@ workflows:
     name: Extra
     tasks:
       - id: e1
-        description: Extra task 1
+        task: Extra task 1
 "#,
         )
         .unwrap();
@@ -299,7 +297,7 @@ workflows:
     name: Main
     tasks:
       - id: m1
-        description: Main task 1
+        task: Main task 1
 "#,
         )
         .unwrap();
@@ -341,7 +339,7 @@ workflows:
     name: WF
     tasks:
       - id: s1
-        description: Step 1
+        task: Step 1
 "#,
         )
         .unwrap();

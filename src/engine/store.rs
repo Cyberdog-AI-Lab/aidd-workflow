@@ -319,7 +319,7 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "task1".to_string(),
-                description: Some("Task 1".to_string()),
+                task: Some("Task 1".to_string()),
                 ..Task::default()
             }],
         }

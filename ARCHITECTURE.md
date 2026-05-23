@@ -134,7 +134,7 @@ workflows:
       - id: <task-id>              # 一意なタスク ID（kebab-case）
 
         # --- 実行モード（排他: prompt/skills と agents は共存不可）---
-        description: タスクの説明  # 手動タスクでは必須、他は任意
+        task: "タスク名"           # 簡潔なタスク名（手動タスクでは必須、他は任意）
         prompt: "..."              # エージェントに渡すプロンプト（{{vars.key}} 展開あり）
         skills:                    # 呼び出すスキルのリスト
           - security-review
@@ -164,30 +164,34 @@ workflows:
 ```yaml
 # 1. 自動タスク（prompt を指定）
 - id: implement
+  task: 実装する
   prompt: "設計に従って実装し、{{vars.test}} でテストを確認してください"
   outputs:
     - "src/**"
 
 # 2. スキルタスク（skills を指定）
 - id: review
+  task: レビューする
   skills:
     - security-review
 
 # 3. prompt + skills の併用
 - id: implement-with-review
-  prompt: "実装してください"
+  task: 実装してレビューする
+  prompt: "レビューしてください"
   skills:
     - security-review
 
 # 4. カスタムエージェントタスク（agents を指定）
 - id: quality-check
+  task: 品質チェック
   agents:
     - run-test    # → .claude/agents/run-test.md
     - run-lint    # → .claude/agents/run-lint.md
 
-# 5. 手動タスク（prompt / skills / agents すべて省略、description 必須）
+# 5. 手動タスク（prompt / skills / agents すべて省略、task 必須）
 - id: design
-  description: 実装方針を整理して記録する（description が必須）
+  task: 設計する（task が必須）
   outputs:
     - "docs/**"
   approval: true  # 設計完了後に承認を取ってから次へ
@@ -454,7 +458,7 @@ load_config(cwd)
 validate(&config):
   ├─ 各ワークフロー: tasks が空でないか
   ├─ 各タスク: (prompt/skills) と agents を同時に持っていないか
-  ├─ 各タスク: 手動タスク（prompt/skills/agents すべて空）なら description があるか
+  ├─ 各タスク: 手動タスク（prompt/skills/agents すべて空）なら task があるか
   ├─ 各タスク: requires に未定義タスクが含まれていないか
   → エラーを全件収集して ValidationError として返す
 

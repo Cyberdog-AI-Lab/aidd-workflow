@@ -23,7 +23,7 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
         };
         tasks.push(TaskOutput {
             task_id: task.id.clone(),
-            description: task.description.clone(),
+            task: task.task.clone(),
             prompt: task.prompt.as_deref().map(|p| resolve_template(p, config)),
             skills: task.skills.clone(),
             agents: task.agents.clone(),
@@ -92,7 +92,7 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "design".to_string(),
-                description: Some("Write the design doc".to_string()),
+                task: Some("Write the design doc".to_string()),
                 ..Task::default()
             }],
         }
@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn build_next_returns_manual_task_with_description() {
+    fn build_next_returns_manual_task_with_task_name() {
         let wf = workflow_manual();
         let config = config_with_vars(&[]);
         let state = WorkflowState::new("test", &wf);
@@ -132,7 +132,7 @@ mod tests {
         let output = build_next(&wf, &state, &config);
         assert_eq!(output.tasks.len(), 1);
         assert_eq!(
-            output.tasks[0].description.as_deref(),
+            output.tasks[0].task.as_deref(),
             Some("Write the design doc")
         );
         assert!(output.tasks[0].prompt.is_none());

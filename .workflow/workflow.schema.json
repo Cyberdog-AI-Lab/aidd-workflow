@@ -84,13 +84,6 @@
             }
           ]
         },
-        "description": {
-          "description": "Human-readable description of the task. Required for manual tasks.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "id": {
           "description": "Unique task identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`",
           "type": "string",
@@ -126,6 +119,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "task": {
+          "description": "Concise task name shown in the task list. Required for manual tasks.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

@@ -26,8 +26,8 @@ pub enum FlowStatus {
 #[derive(Debug, Serialize)]
 pub struct TaskOutput {
     pub task_id: String,
-    /// Full description of the task (used as display name and for manual tasks).
-    pub description: Option<String>,
+    /// Concise task name (used as display name and for manual tasks).
+    pub task: Option<String>,
     /// Prompt for the agent. None for agent-block or manual tasks.
     pub prompt: Option<String>,
     /// Skills to invoke for this task.
@@ -71,8 +71,8 @@ pub struct StatusOutput {
 #[derive(Debug, Serialize)]
 pub struct TaskStatusItem {
     pub id: String,
-    /// Full description shown in status display.
-    pub description: String,
+    /// Concise task name shown in status display.
+    pub task: String,
     pub status: String,
 }
 
@@ -124,12 +124,12 @@ pub fn format_status_table(output: &StatusOutput) -> String {
 
     let mut table = Table::new();
     table.load_preset(UTF8_BORDERS_ONLY);
-    table.set_header(vec!["TASK ID", "DESCRIPTION", "STATUS"]);
+    table.set_header(vec!["TASK ID", "TASK", "STATUS"]);
 
     for task in &output.tasks {
         table.add_row(vec![
             task.id.as_str(),
-            task.description.as_str(),
+            task.task.as_str(),
             task.status.as_str(),
         ]);
     }
@@ -150,7 +150,7 @@ pub fn build_status(state: &WorkflowState, wf: &Workflow) -> StatusOutput {
             .unwrap_or_else(|| "pending".to_string());
         tasks.push(TaskStatusItem {
             id: task.id.clone(),
-            description: task.description.clone().unwrap_or_default(),
+            task: task.task.clone().unwrap_or_default(),
             status,
         });
         // Sub-agents tracked as "parent_id/agent_name" keys.
@@ -163,7 +163,7 @@ pub fn build_status(state: &WorkflowState, wf: &Workflow) -> StatusOutput {
                 .unwrap_or_else(|| "pending".to_string());
             tasks.push(TaskStatusItem {
                 id: key,
-                description: format!("agent: {}", agent_name),
+                task: format!("agent: {}", agent_name),
                 status: sub_status,
             });
         }
@@ -189,7 +189,7 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "s1".to_string(),
-                description: Some("Step 1".to_string()),
+                task: Some("Step 1".to_string()),
                 ..Task::default()
             }],
         }
@@ -215,11 +215,11 @@ mod tests {
     }
 
     #[test]
-    fn build_status_uses_description_as_display() {
+    fn build_status_uses_task_as_display() {
         let wf = minimal_workflow();
         let state = WorkflowState::new("test", &wf);
         let out = build_status(&state, &wf);
-        assert_eq!(out.tasks[0].description, "Step 1");
+        assert_eq!(out.tasks[0].task, "Step 1");
     }
 
     #[test]
@@ -229,7 +229,7 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "p".to_string(),
-                description: Some("Parallel".to_string()),
+                task: Some("Parallel".to_string()),
                 agents: vec!["run-test".to_string(), "run-lint".to_string()],
                 ..Task::default()
             }],
@@ -239,9 +239,9 @@ mod tests {
         // parent + 2 sub-agents
         assert_eq!(out.tasks.len(), 3);
         assert_eq!(out.tasks[1].id, "p/run-test");
-        assert_eq!(out.tasks[1].description, "agent: run-test");
+        assert_eq!(out.tasks[1].task, "agent: run-test");
         assert_eq!(out.tasks[2].id, "p/run-lint");
-        assert_eq!(out.tasks[2].description, "agent: run-lint");
+        assert_eq!(out.tasks[2].task, "agent: run-lint");
     }
 
     #[test]
@@ -279,6 +279,7 @@ mod tests {
         let status = build_status(&state, &wf);
         let table = format_status_table(&status);
         assert!(table.contains("TASK ID"));
+        assert!(table.contains("TASK"));
         assert!(table.contains("STATUS"));
         assert!(table.contains("s1"));
         assert!(table.contains("pending"));

@@ -20,14 +20,17 @@ workflows:
     description: バグを再現・特定し、修正・テストまで完走するフロー
     tasks:
       - id: reproduce
-        description: バグを手元で再現し、再現手順（環境・操作・期待値・実際の挙動）を記録する
-        # prompt/skills/agents なし → 手動タスク（description 必須）
+        task: バグを再現する
+        prompt: |
+          バグを手元で再現し、再現手順（環境・操作・期待値・実際の挙動）を記録してください。
 
       - id: identify
-        description: 原因となるファイル・関数・行を特定して記録する
+        task: 原因を特定する
+        prompt: |
+          再現結果をもとに、原因となるファイル・関数・行を特定して記録してください。
 
       - id: implement
-        description: 最小限の変更でバグを修正する。影響範囲を意識すること
+        task: バグを修正する
         prompt: |
           原因特定の結果に基づき、最小限の変更でバグを修正してください。
           修正後は {{vars.test}} を実行してテストがすべてパスすることを確認してください。
@@ -37,7 +40,9 @@ workflows:
         requires: [reproduce, identify]
 
       - id: complete
-        description: すべてのタスクが完了したことを確認し、作業を完了とマークする
+        task: 完了確認
+        prompt: |
+          すべてのタスクが完了したことを確認し、作業サマリーを報告してください。
         requires: [implement]
 
   feature:
@@ -45,14 +50,16 @@ workflows:
     description: 新機能を設計・実装・テストするフロー
     tasks:
       - id: design
-        description: 実装方針・影響範囲・インターフェースを整理して記録する
+        task: 設計する
+        prompt: |
+          実装方針・影響範囲・インターフェースを整理して設計ドキュメントを作成してください。
         outputs:
           - "docs/**"
           - "/.*\\.md$/"
-        approval: true   # 設計完了後に開発者の承認を得てから実装へ進む
+        approval: true   # wait for developer approval before implementation
 
       - id: implement
-        description: 設計に従って実装する
+        task: 実装する
         prompt: |
           設計書に従って実装してください。
           実装後は {{vars.test}} と {{vars.lint}} を実行して品質を確認してください。
@@ -65,7 +72,9 @@ workflows:
         requires: [design]
 
       - id: complete
-        description: 実装・テストが完了したことを確認する
+        task: 完了確認
+        prompt: |
+          実装・テストが完了したことを確認してサマリーを報告してください。
         requires: [implement]
 
   release:
@@ -73,13 +82,15 @@ workflows:
     description: 設計・実装・品質チェック（並列）まで完走するフロー
     tasks:
       - id: design
-        description: 実装方針・影響範囲・インターフェースを整理して記録する
+        task: 設計する
+        prompt: |
+          実装方針・影響範囲・インターフェースを整理して設計ドキュメントを作成してください。
         outputs:
           - "docs/**"
         approval: true
 
       - id: implement
-        description: 設計に従って実装する
+        task: 実装する
         prompt: |
           設計書に従って実装してください。
           実装後は {{vars.build}} でビルドを確認してください。
@@ -89,13 +100,15 @@ workflows:
         requires: [design]
 
       - id: quality-check
-        description: テストと Lint を並列で実行する
+        task: 品質チェック
         requires: [implement]
         agents:
           - run-test    # → .claude/agents/run-test.md を参照
           - run-lint    # → .claude/agents/run-lint.md を参照
 
       - id: complete
-        description: 設計・実装・品質チェックが完了したことを確認する
+        task: 完了確認
+        prompt: |
+          設計・実装・品質チェックが完了したことを確認してリリースサマリーを報告してください。
         requires: [quality-check]
         approval: true

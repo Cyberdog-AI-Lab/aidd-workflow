@@ -333,7 +333,7 @@ fn cmd_reject(
             .find(|t| t.id == task_id)
             .map(|task| protocol::output::TaskOutput {
                 task_id: task.id.clone(),
-                description: task.description.clone(),
+                task: task.task.clone(),
                 prompt: task
                     .prompt
                     .as_deref()

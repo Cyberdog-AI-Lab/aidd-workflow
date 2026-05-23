@@ -54,13 +54,25 @@ description: >
 ./target/debug/workflow-runner start <workflow-name>
 ```
 
-出力 JSON の `tasks` 配列を処理する。
+出力 JSON の `workflow_id` と `tasks` 配列を保持する。
+
+### 3. TaskCreate で各タスクを登録する
+
+`start` が返した `tasks` 配列の各タスクに対して **TaskCreate** を呼ぶ：
+
+- `subject`：タスクの `task` フィールド（簡潔なタスク名）
+- `description`：`prompt` があれば prompt の内容、なければ `task` の値
+- `metadata`：`{ "workflow_id": "<workflow_id>", "task_id": "<task_id>" }`
+
+返された TaskCreate の ID を記録し、実行・完了時に TaskUpdate でステータスを更新する。
 
 ---
 
 ## タスクの dispatch
 
-`tasks` 配列の各 `TaskOutput` を `description` / `prompt` / `skills` / `agents` に従って実行する。
+`tasks` 配列の各 `TaskOutput` を `task` / `prompt` / `skills` / `agents` に従って実行する。
+
+実行開始前に TaskUpdate でステータスを `in_progress` に更新する。
 
 | 条件 | 実行方法 |
 |------|---------|
@@ -68,7 +80,7 @@ description: >
 | `skills` あり | 各スキルを Skill ツールで呼び出す |
 | `prompt` と `skills` 両方あり | `prompt` を Agent で実行後、`skills` を順に呼ぶ |
 | `agents` あり | 各エージェントを Agent ツールで並列起動する（後述） |
-| すべて空 | `description` に従って Claude が直接作業する（手動タスク） |
+| すべて空 | `task` に従って Claude が直接作業する（手動タスク） |
 
 ---
 
@@ -83,12 +95,17 @@ echo '{"session_id":"<id>","task_id":"<task>","action_index":0,"action_type":"ag
 ./target/debug/workflow-runner complete <task-id>
 ```
 
+完了後、対応する TaskUpdate でステータスを `completed` に更新する。
+
+`complete` レスポンスの `next.tasks` に新しいタスクが含まれる場合は、
+**それぞれに対して TaskCreate を呼んで登録してから** dispatch する。
+
 ### レスポンスの解釈
 
 | `allowed` | `next.status` | 対応 |
 |-----------|---------------|------|
 | `false` | — | `reason` をユーザーに伝えてブロック。gate 未実行なら該当作業を実行 |
-| `true` | `in_progress` | `next.tasks` を dispatch する |
+| `true` | `in_progress` | `next.tasks` を TaskCreate して dispatch する |
 | `true` | `completed` | ワークフロー完了。完了サマリーを表示する |
 | `true` | `blocked` | 未解決の依存がある。`status` で確認する |
 | `true` | `awaiting_approval` | 承認待ち（後述） |
@@ -122,7 +139,7 @@ echo '{"session_id":"<id>","task_id":"<task>","action_index":0,"action_type":"ag
 
 `complete` レスポンスで `next.status == "awaiting_approval"` の場合：
 
-1. タスクの `description` をユーザーに表示する
+1. タスクの `task` をユーザーに表示する
 2. 「次のタスクに進む前に承認が必要です。承認しますか？」と確認を取る
 
 ### 承認された場合
@@ -131,7 +148,7 @@ echo '{"session_id":"<id>","task_id":"<task>","action_index":0,"action_type":"ag
 ./target/debug/workflow-runner next
 ```
 
-承認が解除され、次タスクを dispatch する。
+承認が解除され、次タスクを dispatch する（TaskCreate で登録してから実行）。
 
 ### 却下された場合
 
