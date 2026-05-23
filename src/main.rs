@@ -281,7 +281,7 @@ fn cmd_validate(cwd: &Path, format: &str) -> Result<String> {
             let out = ValidateOutput {
                 valid: false,
                 workflow_count: 0,
-                commands: vec![],
+                vars: vec![],
                 errors: vec![format!(
                     ".workflow/config.yml not found: {}",
                     path.display()
@@ -297,7 +297,7 @@ fn cmd_validate(cwd: &Path, format: &str) -> Result<String> {
             let out = ValidateOutput {
                 valid: false,
                 workflow_count: 0,
-                commands: vec![],
+                vars: vec![],
                 errors: vec![format!("YAML parse error: {}", e)],
             };
             return Ok(render_validate(&out, format));
@@ -308,16 +308,16 @@ fn cmd_validate(cwd: &Path, format: &str) -> Result<String> {
         Err(ve) => ValidateOutput {
             valid: false,
             workflow_count: config.workflows.len(),
-            commands: config.commands.keys().cloned().collect(),
+            vars: config.vars.keys().cloned().collect(),
             errors: ve.errors,
         },
         Ok(()) => {
-            let mut commands: Vec<String> = config.commands.keys().cloned().collect();
-            commands.sort();
+            let mut vars: Vec<String> = config.vars.keys().cloned().collect();
+            vars.sort();
             ValidateOutput {
                 valid: true,
                 workflow_count: config.workflows.len(),
-                commands,
+                vars,
                 errors: vec![],
             }
         }

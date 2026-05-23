@@ -46,7 +46,7 @@
 ┌─────────────▼────────────────────────────────────────────┐
 │                   状態層（SQLite）                         │
 │  .workflow/config.yml       .workflow/workflow.db         │
-│  .workflow/commands/        .workflow/workflow.schema.json│
+│  .workflow/vars/            .workflow/workflow.schema.json│
 │  .workflow/workflows/                                     │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -91,7 +91,7 @@ aidd-workflow/
 │       └── output.rs                    JSON 出力型・テーブルフォーマッター（Pure）
 ├── .workflow/
 │   ├── config.yml                       ワークフロー定義（ユーザーが編集）
-│   ├── commands/                        コマンド定義（imports で読み込む）
+│   ├── vars/                            変数定義（imports で読み込む）
 │   │   └── default.yml
 │   ├── workflows/                       ワークフロー定義（imports で読み込む）
 │   │   ├── bug-fix.yml
@@ -113,18 +113,18 @@ aidd-workflow/
 ```yaml
 # .workflow/config.yml（メインファイル）
 imports:
-  - commands/default.yml     # コマンド定義ファイル
+  - vars/default.yml         # 変数定義ファイル
   - workflows/bug-fix.yml    # ワークフロー定義ファイル
   - workflows/feature.yml
 
 # インライン定義と imports はマージされる（インラインが優先）
-commands:
+vars:
   extra: make extra
 ```
 
 ```yaml
-# .workflow/commands/default.yml
-commands:
+# .workflow/vars/default.yml
+vars:
   test: make test
   lint: make lint
   build: make build
@@ -132,7 +132,7 @@ commands:
 
 - `imports` のパスはメイン config.yml と同じディレクトリからの相対パス
 - 再帰的なインポートを許容する（循環参照は検出してエラー）
-- `commands` は同一キーがある場合、インライン定義が優先される
+- `vars` は同一キーがある場合、インライン定義が優先される
 - `workflows` は同一 slug がある場合エラー
 
 ### タスクの基本構造（v5）
@@ -184,7 +184,7 @@ workflows:
 - id: test
   actions:
     - type: agent
-      prompt: "{{commands.test}} を実行してテストがすべてパスすることを確認してください"
+      prompt: "{{vars.test}} を実行してテストがすべてパスすることを確認してください"
 
 # 2. サブエージェントタスク（agents ブロック）
 - id: quality-check
@@ -648,17 +648,17 @@ validate(&config):  ← マージ後の Config にのみ実行（個別インポ
 
 ## テンプレート解決
 
-`executor::resolve_template(s, config)` が `{{commands.<key>}}` を config.commands の値で置換します。未定義キーはそのまま残します。
+`executor::resolve_template(s, config)` が `{{vars.<key>}}` を config.vars の値で置換します。未定義キーはそのまま残します。
 
 ```yaml
-commands:
+vars:
   test: make test
 
 actions:
   - type: agent
-    prompt: "{{commands.test}} を実行してください"   # → "make test を実行してください" に展開
+    prompt: "{{vars.test}} を実行してください"   # → "make test を実行してください" に展開
   - type: agent
-    prompt: "{{commands.lint}} を実行してください"   # → 未定義のため "{{commands.lint}} ..." のまま
+    prompt: "{{vars.lint}} を実行してください"   # → 未定義のため "{{vars.lint}} ..." のまま
 ```
 
 ---

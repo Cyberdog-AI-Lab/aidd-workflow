@@ -7,8 +7,8 @@
 #   - commands/default.yml
 #   - workflows/extra.yml
 
-# プロジェクト固有のコマンド定義（Makefile の target 名を登録する）
-commands:
+# プロジェクト固有の変数定義（Makefile の target 名を登録する）
+vars:
   test: make test
   lint: make lint
   build: make build
@@ -93,12 +93,12 @@ workflows:
             name: テスト実行
             actions:
               - type: agent
-                prompt: "{{commands.test}} を実行してテストがすべてパスすることを確認してください"
+                prompt: "{{vars.test}} を実行してテストがすべてパスすることを確認してください"
           - id: run-lint
             name: Lint
             actions:
               - type: agent
-                prompt: "{{commands.lint}} を実行して Lint が通ることを確認してください"
+                prompt: "{{vars.lint}} を実行して Lint が通ることを確認してください"
 
       - id: complete
         name: 完了判定

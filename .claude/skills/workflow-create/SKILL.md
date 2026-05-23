@@ -18,7 +18,7 @@ description: >
 ## 前提確認
 
 1. `.workflow/config.yml` が存在するか確認する
-   - **存在する場合**：ファイルを読み、既存の `commands` キーと `workflows` スラッグを把握する
+   - **存在する場合**：ファイルを読み、既存の `vars` キーと `workflows` スラッグを把握する
    - **存在しない場合**：新規作成モードで進める（後述）
 
 2. `.workflow/workflow.schema.json` が存在するか確認する（バリデーション用）
@@ -45,9 +45,9 @@ description: >
 
 gate タスクで使うコマンドを定義する。
 
-- **config.yml が存在する場合**：現在の `commands` を表示する
+- **config.yml が存在する場合**：現在の `vars` を表示する
   ```
-  現在のコマンド： test: make test / lint: make lint / build: make build
+  現在の変数： test: make test / lint: make lint / build: make build
   ```
 - **新規作成の場合**：以下を確認する
   ```
@@ -57,7 +57,7 @@ gate タスクで使うコマンドを定義する。
 
 - **ヒアリング中に新しいコマンドキーが必要になった場合**：
   ```
-  `commands` に新しいコマンドを追加しますか？
+  `vars` に新しい変数を追加しますか？
   キー名：> deploy
   コマンド：> make deploy
   ```
@@ -73,7 +73,7 @@ gate タスクで使うコマンドを定義する。
   id（英小文字・ハイフン区切り）：>
   名前：>
   説明（任意）：>
-  ゲート（任意、利用可能: {commands のキー一覧}）：>
+  ゲート（任意、利用可能: {vars のキー一覧}）：>
 
 タスクを追加しますか？ [y/n]：
 ```
@@ -83,7 +83,7 @@ gate タスクで使うコマンドを定義する。
 | フィールド | ルール |
 |-----------|-------|
 | `id` | `^[a-z][a-z0-9_-]*$`。重複不可（同一ワークフロー内） |
-| `gate` | `commands` に定義されたキーのみ。未定義キーを指定したら「`{gate値}` は commands に定義されていません。追加しますか？」と促す |
+| `gate` | `vars` に定義されたキーのみ。未定義キーを指定したら「`{gate値}` は vars に定義されていません。追加しますか？」と促す |
 
 `description`・`gate` は空白入力でスキップ（YAML に出力しない）。
 
@@ -126,7 +126,7 @@ gate タスクで使うコマンドを定義する。
 # yaml-language-server: $schema=./workflow.schema.json
 # workflow-orchestrator 設定ファイル
 
-commands:
+vars:
   test: {テストコマンド}
   # lint: make lint
   # build: make build
@@ -162,6 +162,6 @@ workflows:
 | 状況 | 対応 |
 |------|------|
 | スラッグ重複（上書き拒否） | 別のスラッグで再入力を促す |
-| gate に未定義キーを指定 | 「追加しますか？」で commands への追加を提案 |
+| gate に未定義キーを指定 | 「追加しますか？」で vars への追加を提案 |
 | スキーマ警告が出た | 自己修正してから完了報告する |
 | `.workflow/` ディレクトリが存在しない | `mkdir -p .workflow` を実行してから書き込む |

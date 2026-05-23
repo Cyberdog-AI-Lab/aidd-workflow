@@ -10,9 +10,9 @@ pub struct Config {
     /// Additional YAML files to merge, relative to .workflow/
     #[serde(default)]
     pub imports: Vec<String>,
-    /// Named shell commands. Use `{{commands.<key>}}` in action prompts for interpolation.
+    /// Named variables. Use `{{vars.<key>}}` in action prompts for interpolation.
     #[serde(default)]
-    pub commands: HashMap<String, String>,
+    pub vars: HashMap<String, String>,
     #[serde(default)]
     pub workflows: HashMap<String, Workflow>,
 }
@@ -184,7 +184,7 @@ deny:
 
     #[test]
     fn config_defaults_empty_imports() {
-        let yaml = r#"commands:
+        let yaml = r#"vars:
   test: make test
 workflows: {}"#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();

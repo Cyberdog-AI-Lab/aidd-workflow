@@ -48,10 +48,10 @@ cargo build
 
 ### 3. config.yml を編集
 
-`.workflow/config.yml` でプロジェクトのコマンドを設定する：
+`.workflow/config.yml` でプロジェクトの変数を設定する：
 
 ```yaml
-commands:
+vars:
   test: npm test
   lint: npm run lint
   build: npm run build
@@ -95,7 +95,7 @@ commands:
 ```yaml
 # .workflow/config.yml
 imports:
-  - commands/default.yml
+  - vars/default.yml
   - workflows/release.yml
 ```
 
@@ -127,7 +127,7 @@ workflows:
           - id: lint
             actions:
               - type: agent
-                prompt: "{{commands.lint}} を実行して Lint が通ることを確認してください"
+                prompt: "{{vars.lint}} を実行して Lint が通ることを確認してください"
           - id: security
             actions:
               - type: skill
@@ -168,7 +168,7 @@ src/                             # workflow-runner（Rust）
 
 .workflow/
 ├── config.yml                   ワークフロー定義（編集する）
-├── commands/                    コマンド定義（imports で読み込む）
+├── vars/                        変数定義（imports で読み込む）
 ├── workflows/                   ワークフロー定義（imports で読み込む）
 ├── workflow.schema.json         JSON Schema（編集不要）
 └── workflow.db                  実行状態 SQLite（自動生成）

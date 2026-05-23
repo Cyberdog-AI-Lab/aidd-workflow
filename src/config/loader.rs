@@ -24,7 +24,7 @@ impl std::fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 /// Loads and merges config from `.workflow/config.yml` and any `imports`.
-/// Validation (including `commands.test` check) runs only on the fully merged config.
+/// Validation (including `vars.test` check) runs only on the fully merged config.
 pub fn load_config(cwd: &Path) -> Result<Config> {
     let root = cwd.join(".workflow/config.yml");
     let config = load_config_recursive(&root, cwd, &mut HashSet::new())?;
@@ -63,8 +63,8 @@ fn load_config_recursive(
 }
 
 fn merge_into(base: &mut Config, child: Config) {
-    for (k, v) in child.commands {
-        base.commands.entry(k).or_insert(v);
+    for (k, v) in child.vars {
+        base.vars.entry(k).or_insert(v);
     }
     for (k, v) in child.workflows {
         base.workflows.entry(k).or_insert(v);
@@ -142,7 +142,7 @@ mod tests {
         );
         Config {
             imports: vec![],
-            commands: HashMap::new(),
+            vars: HashMap::new(),
             workflows,
         }
     }
@@ -153,9 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_empty_commands() {
+    fn validate_accepts_empty_vars() {
         let mut config = minimal_config();
-        config.commands.clear();
+        config.vars.clear();
         assert!(validate(&config).is_ok());
     }
 
@@ -276,7 +276,7 @@ workflows:
 
         std::fs::write(
             wf_dir.join("workflows/extra.yml"),
-            r#"commands:
+            r#"vars:
   lint: make lint
 workflows:
   extra:
@@ -305,7 +305,7 @@ workflows:
         let config = load_config(dir.path()).unwrap();
         assert!(config.workflows.contains_key("extra"));
         assert!(config.workflows.contains_key("main"));
-        assert!(config.commands.contains_key("lint"));
+        assert!(config.vars.contains_key("lint"));
     }
 
     #[test]

@@ -255,7 +255,7 @@ mod tests {
         // Write minimal config so load_config succeeds.
         write_config(
             dir.path(),
-            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          files:\n            - \"docs/specs/**\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          files:\n            - \"docs/specs/**\"\n",
         );
         save_state(dir.path(), &state).unwrap();
 
@@ -276,7 +276,7 @@ mod tests {
 
         write_config(
             dir.path(),
-            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        allow_files:\n          - \"src/**\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        allow_files:\n          - \"src/**\"\n",
         );
 
         let wf_for_state = Workflow {
@@ -309,7 +309,7 @@ mod tests {
 
         write_config(
             dir.path(),
-            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        allow_files:\n          - \"src/**\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        allow_files:\n          - \"src/**\"\n",
         );
 
         let wf_for_state = Workflow {
@@ -343,7 +343,7 @@ mod tests {
 
         write_config(
             dir.path(),
-            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          commands:\n            - \"git push\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          commands:\n            - \"git push\"\n",
         );
 
         let wf_for_state = Workflow {
@@ -378,7 +378,7 @@ mod tests {
 
         write_config(
             dir.path(),
-            "commands:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          commands:\n            - \"git push\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          commands:\n            - \"git push\"\n",
         );
 
         let wf_for_state = Workflow {

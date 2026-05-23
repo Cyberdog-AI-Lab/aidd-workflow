@@ -4,8 +4,8 @@
 	"description": "Root config.yml or any import file for workflow-orchestrator. All top-level keys are optional in individual files; they are merged before validation.",
 	"type": "object",
 	"properties": {
-		"commands": {
-			"description": "Named shell commands. Use `{{commands.<key>}}` in action prompts for interpolation.",
+		"vars": {
+			"description": "Named variables. Use `{{vars.<key>}}` in action prompts for interpolation.",
 			"default": {},
 			"type": "object",
 			"additionalProperties": {

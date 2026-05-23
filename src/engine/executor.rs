@@ -103,8 +103,8 @@ fn resolve(action: &Action, config: &Config) -> ResolvedAction {
 
 pub fn resolve_template(s: &str, config: &Config) -> String {
     let mut result = s.to_string();
-    for (key, value) in &config.commands {
-        result = result.replace(&format!("{{{{commands.{}}}}}", key), value);
+    for (key, value) in &config.vars {
+        result = result.replace(&format!("{{{{vars.{}}}}}", key), value);
     }
     result
 }
@@ -112,16 +112,16 @@ pub fn resolve_template(s: &str, config: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Action, SubAgentTask, Config, Task, Workflow};
+    use crate::config::types::{Action, Config, SubAgentTask, Task, Workflow};
     use crate::engine::state::{StepStatus, WorkflowState};
     use std::collections::HashMap;
 
     fn config_with_test_cmd(cmd: &str) -> Config {
-        let mut commands = HashMap::new();
-        commands.insert("test".to_string(), cmd.to_string());
+        let mut vars = HashMap::new();
+        vars.insert("test".to_string(), cmd.to_string());
         Config {
             imports: vec![],
-            commands,
+            vars,
             workflows: HashMap::new(),
         }
     }
@@ -158,15 +158,15 @@ mod tests {
     #[test]
     fn resolve_template_substitutes_command() {
         let config = config_with_test_cmd("make test");
-        let result = resolve_template("{{commands.test}}", &config);
+        let result = resolve_template("{{vars.test}}", &config);
         assert_eq!(result, "make test");
     }
 
     #[test]
     fn resolve_template_leaves_unknown_key() {
         let config = config_with_test_cmd("make test");
-        let result = resolve_template("{{commands.build}}", &config);
-        assert_eq!(result, "{{commands.build}}");
+        let result = resolve_template("{{vars.build}}", &config);
+        assert_eq!(result, "{{vars.build}}");
     }
 
     #[test]

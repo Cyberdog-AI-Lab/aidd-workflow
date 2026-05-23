@@ -95,7 +95,7 @@ pub struct ErrorOutput {
 pub struct ValidateOutput {
     pub valid: bool,
     pub workflow_count: usize,
-    pub commands: Vec<String>,
+    pub vars: Vec<String>,
     pub errors: Vec<String>,
 }
 
@@ -103,12 +103,12 @@ pub struct ValidateOutput {
 pub fn format_validate_text(output: &ValidateOutput) -> String {
     if output.valid {
         format!(
-            "config.yml is valid ({} workflow(s), commands: {})",
+            "config.yml is valid ({} workflow(s), vars: {})",
             output.workflow_count,
-            if output.commands.is_empty() {
+            if output.vars.is_empty() {
                 "(none)".to_string()
             } else {
-                output.commands.join(", ")
+                output.vars.join(", ")
             }
         )
     } else {
@@ -261,7 +261,7 @@ mod tests {
         let out = ValidateOutput {
             valid: true,
             workflow_count: 2,
-            commands: vec!["lint".to_string(), "test".to_string()],
+            vars: vec!["lint".to_string(), "test".to_string()],
             errors: vec![],
         };
         let text = format_validate_text(&out);
@@ -275,7 +275,7 @@ mod tests {
         let out = ValidateOutput {
             valid: false,
             workflow_count: 1,
-            commands: vec![],
+            vars: vec![],
             errors: vec!["first error".to_string(), "second error".to_string()],
         };
         let text = format_validate_text(&out);
