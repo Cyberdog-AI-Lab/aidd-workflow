@@ -112,16 +112,16 @@ workflows:
     name: リリースフロー
     description: 設計・実装・品質チェック（並列）まで完走するフロー
     tasks:
-      # 手動タスク（description に従って Claude が直接作業）
+      # 手動タスク（prompt/skills/agents すべて省略。task が必須）
       - id: design
-        description: 実装方針・影響範囲・インターフェースを整理して記録する
+        task: 設計する
         outputs:           # InProgress 中は docs/ 以下のみ編集可
           - "docs/**"
         approval: true     # 完了後に開発者の承認を得てから次へ進む
 
       # プロンプトタスク（Agent で実行）
       - id: implement
-        description: 設計に従って実装する
+        task: 実装する
         prompt: |
           設計書に従って実装してください。
           実装後は {{vars.build}} でビルドを確認してください。
@@ -132,14 +132,16 @@ workflows:
 
       # エージェントタスク（.claude/agents/ 以下を並列起動）
       - id: quality-check
-        description: テストと Lint を並列で実行する
+        task: 品質チェック
         requires: [implement]
         agents:
           - run-test    # → .claude/agents/run-test.md
           - run-lint    # → .claude/agents/run-lint.md
 
       - id: complete
-        description: 設計・実装・品質チェックが完了したことを確認する
+        task: 完了確認
+        prompt: |
+          設計・実装・品質チェックが完了したことを確認してリリースサマリーを報告してください。
         requires: [quality-check]
         approval: true
 ```
@@ -152,7 +154,7 @@ workflows:
 | `skills` あり | 各スキルを Skill ツールで呼び出す |
 | `prompt` と `skills` 両方あり | `prompt` を Agent で実行後、`skills` を順に呼ぶ |
 | `agents` あり | `.claude/agents/<name>.md` を並列起動（`prompt`/`skills` と併用不可） |
-| すべて空 | `description` に従って Claude が直接作業（手動タスク、`description` 必須） |
+| すべて空 | 手動タスク。Claude が `task` の指示名を手がかりに直接作業する（`task` フィールドが必須） |
 
 ### approval フロー
 
