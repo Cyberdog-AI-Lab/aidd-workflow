@@ -12,7 +12,7 @@ description: >
 
 # Workflow Runner スキル
 
-`workflow-runner` バイナリが判断ロジックを持ち、このスキルはアクションを dispatch するだけ。
+`workflow-runner` バイナリが判断ロジックを持ち、このスキルはタスクを dispatch するだけ。
 各タスクのゲートは Hooks + `workflow-runner` が自動で検証する。
 
 ---
@@ -48,45 +48,38 @@ description: >
 
 選択されたワークフローの内容を表示して確認を取る。
 
-### 2. `start` を実行して最初のアクションを取得する
+### 2. `start` を実行して最初のタスクを取得する
 
 ```bash
 ./target/debug/workflow-runner start <workflow-name>
 ```
 
-出力 JSON の `actions` 配列を処理する。
+出力 JSON の `tasks` 配列を処理する。
 
 ---
 
-## アクションの dispatch
+## タスクの dispatch
 
-`actions` 配列の各 `ActionItem` を `type` フィールドに従って実行する。
+`tasks` 配列の各 `TaskOutput` を `description` / `prompt` / `skills` / `agents` に従って実行する。
 
-| type | 実行方法 |
+| 条件 | 実行方法 |
 |------|---------|
-| `agent` | Agent ツールで `prompt` を実行する。`background: true` なら並列実行してよい |
-| `skill` | Skill ツールで `skill` を呼び出す |
-| `workflow` | `./target/debug/workflow-runner start <workflow>` を再帰的に実行する |
-| `manual` | `description` に従って Claude が作業する |
+| `prompt` あり（`agents` なし） | Agent ツールで `prompt` を実行する |
+| `skills` あり | 各スキルを Skill ツールで呼び出す |
+| `prompt` と `skills` 両方あり | `prompt` を Agent で実行後、`skills` を順に呼ぶ |
+| `agents` あり | 各エージェントを Agent ツールで並列起動する（後述） |
+| すべて空 | `description` に従って Claude が直接作業する（手動タスク） |
 
 ---
 
-## アクション完了後の処理
+## タスク完了後の処理
 
-各アクション実行後、`agent` / `skill` タイプは結果を report する：
+各タスクが終わったら `report` → `complete` を呼ぶ：
 
 ```bash
-echo '{"session_id":"<id>","task_id":"<task>","action_index":<n>,"action_type":"<type>","exit_code":<code>,"stdout":"<out>","stderr":""}' \
+echo '{"session_id":"<id>","task_id":"<task>","action_index":0,"action_type":"agent","exit_code":0,"stdout":""}' \
   | ./target/debug/workflow-runner report
-```
 
----
-
-## タスク完了
-
-1タスクの全アクションが終わったら complete を呼ぶ：
-
-```bash
 ./target/debug/workflow-runner complete <task-id>
 ```
 
@@ -94,45 +87,62 @@ echo '{"session_id":"<id>","task_id":"<task>","action_index":<n>,"action_type":"
 
 | `allowed` | `next.status` | 対応 |
 |-----------|---------------|------|
-| `false` | - | `reason` をユーザーに伝えてブロック。gate 未実行なら該当コマンドを実行 |
-| `true` | `in_progress` | `next.actions` を dispatch する |
+| `false` | — | `reason` をユーザーに伝えてブロック。gate 未実行なら該当作業を実行 |
+| `true` | `in_progress` | `next.tasks` を dispatch する |
 | `true` | `completed` | ワークフロー完了。完了サマリーを表示する |
-| `true` | `blocked` | 未解決の requires 依存がある。`status` で確認する |
+| `true` | `blocked` | 未解決の依存がある。`status` で確認する |
+| `true` | `awaiting_approval` | 承認待ち（後述） |
 
 ---
 
-## サブエージェントアクションの実行
+## agents ブロックの実行
 
-### agents ブロック（`sub_agent: true`）
+`tasks` に `"agents": ["run-test", "run-lint"]` が含まれる場合：
 
-`actions` 配列に `"sub_agent": true` の `ActionItem` が含まれる場合、それらは `agents` ブロックのサブエージェントを表す。`task_id` は `"parent/sub"` 形式になる。
-
-```
-actions: [
-  { "task_id": "quality-check/run-test", "sub_agent": true, "type": "agent", "prompt": "make test を実行してください" },
-  { "task_id": "quality-check/run-lint", "sub_agent": true, "type": "agent", "prompt": "make lint を実行してください" },
-  { "task_id": "quality-check/security", "sub_agent": true, "type": "skill", "skill": "security-review" }
-]
-```
-
-実行方針：
-- `sub_agent: true` のアクションは Agent ツールでサブエージェントとして起動する
-- `background: true` → 複数サブエージェントを並列起動する
-- `background: false` → 順番に実行する
-
-各アクション完了後、`report` を呼んで結果を記録する。`task_id` はサブエージェント ID（`parent/sub`）を使う。
-
-全サブエージェントが完了したら、**親タスクの ID**（`/` を含まない部分）で `complete` を呼ぶ：
+1. 各エージェントを Agent ツールで **並列起動** する（`.claude/agents/<name>.md` が定義）
+2. 各エージェント完了後、サブエージェント ID で `complete` を呼ぶ：
 
 ```bash
-./target/debug/workflow-runner complete quality-check
+./target/debug/workflow-runner complete <parent-task-id>/<agent-name>
+# 例: ./target/debug/workflow-runner complete quality-check/run-test
 ```
 
-### エージェントアクション内の background（`sub_agent: false`）
+3. 全エージェント完了後、**親タスク ID** で `complete` を呼ぶ：
 
-同一タスクの `actions` 配列に複数の `ActionItem` が含まれ、`type: agent` かつ `background: true` のものがある場合：
-- `background: true` の `agent` / `skill` は Agent ツールで並列起動する
-- `background: false` は順番に実行する
+```bash
+./target/debug/workflow-runner complete <parent-task-id>
+# 例: ./target/debug/workflow-runner complete quality-check
+```
+
+> gate チェックで未完了エージェントが残っていれば `allowed: false` が返る。
+
+---
+
+## approval タスクの完了後
+
+`complete` レスポンスで `next.status == "awaiting_approval"` の場合：
+
+1. タスクの `description` をユーザーに表示する
+2. 「次のタスクに進む前に承認が必要です。承認しますか？」と確認を取る
+
+### 承認された場合
+
+```bash
+./target/debug/workflow-runner next
+```
+
+承認が解除され、次タスクを dispatch する。
+
+### 却下された場合
+
+理由をヒアリングし：
+
+```bash
+./target/debug/workflow-runner reject <task-id> --reason "<理由>"
+```
+
+レスポンスの `task` を使って同タスクを再 dispatch する。
+再完了後、同じ承認フローに入る（回数制限なし）。
 
 ---
 
@@ -159,6 +169,7 @@ actions: [
 | 状況 | 対応 |
 |------|------|
 | `workflow-runner` が存在しない | `cargo build` を実行してビルドする |
-| gate ブロック | `reason` を伝えて該当コマンドを実行してから再度 `complete` |
+| gate ブロック | `reason` を伝えて該当作業を実行してから再度 `complete` |
 | セッション中断 | `workflow-runner next` で再開情報を取得 |
 | config.yml の警告 | スキーマ警告が出たら自己修正してから報告 |
+| agents で一部が未完了 | 残りのエージェントを完了させてから `complete <parent>` |

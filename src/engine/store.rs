@@ -152,15 +152,17 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
     })
 }
 
-/// Loads the single active workflow for the given cwd.
-/// Returns None if no active workflow exists.
-/// Returns an error if multiple active workflows exist (use --workflow-id to disambiguate).
+/// Loads the single active (or awaiting-approval) workflow for the given cwd.
+/// Returns None if no such workflow exists.
+/// Returns an error if multiple qualifying workflows exist (use --workflow-id to disambiguate).
 pub fn load_state(cwd: &Path) -> Result<Option<WorkflowState>> {
     let conn = open_db(cwd)?;
     let cwd_str = cwd.to_string_lossy();
 
-    let mut stmt =
-        conn.prepare("SELECT workflow_id FROM workflow_runs WHERE cwd = ?1 AND status = 'active'")?;
+    let mut stmt = conn.prepare(
+        "SELECT workflow_id FROM workflow_runs
+         WHERE cwd = ?1 AND status IN ('active', 'awaiting_approval')",
+    )?;
     let ids: Vec<String> = stmt
         .query_map(params![cwd_str], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -175,13 +177,14 @@ pub fn load_state(cwd: &Path) -> Result<Option<WorkflowState>> {
     }
 }
 
-/// Loads a workflow by its explicit workflow_id.
+/// Loads a workflow by its explicit workflow_id (active or awaiting-approval).
 pub fn load_state_by_id(cwd: &Path, workflow_id: &str) -> Result<Option<WorkflowState>> {
     let conn = open_db(cwd)?;
 
     let exists: bool = conn
         .query_row(
-            "SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = ?1 AND status = 'active'",
+            "SELECT COUNT(*) FROM workflow_runs
+             WHERE workflow_id = ?1 AND status IN ('active', 'awaiting_approval')",
             params![workflow_id],
             |row| row.get::<_, i64>(0),
         )
@@ -196,6 +199,7 @@ pub fn load_state_by_id(cwd: &Path, workflow_id: &str) -> Result<Option<Workflow
 }
 
 /// Saves (upserts) the workflow state to SQLite.
+/// Does NOT overwrite `status` on update — use `set_workflow_status` to change it.
 pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
     let conn = open_db(cwd)?;
     let cwd_str = cwd.to_string_lossy();
@@ -256,16 +260,25 @@ pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
     Ok(())
 }
 
-/// Marks the single active workflow as completed.
-#[allow(dead_code)]
-pub fn clear_state(cwd: &Path) -> Result<()> {
+/// Returns the current status string of a workflow_run row.
+pub fn get_workflow_status(cwd: &Path, workflow_id: &str) -> Result<String> {
     let conn = open_db(cwd)?;
-    let cwd_str = cwd.to_string_lossy();
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM workflow_runs WHERE workflow_id = ?1",
+            params![workflow_id],
+            |row| row.get(0),
+        )
+        .context("workflow not found")?;
+    Ok(status)
+}
 
+/// Updates the status column of a workflow_run row.
+pub fn set_workflow_status(cwd: &Path, workflow_id: &str, status: &str) -> Result<()> {
+    let conn = open_db(cwd)?;
     conn.execute(
-        "UPDATE workflow_runs SET status = 'completed', completed_at = ?1
-         WHERE cwd = ?2 AND status = 'active'",
-        params![Utc::now().to_rfc3339(), cwd_str],
+        "UPDATE workflow_runs SET status = ?1 WHERE workflow_id = ?2",
+        params![status, workflow_id],
     )?;
     Ok(())
 }
@@ -273,11 +286,23 @@ pub fn clear_state(cwd: &Path) -> Result<()> {
 /// Marks a specific workflow as completed.
 pub fn clear_state_by_id(cwd: &Path, workflow_id: &str) -> Result<()> {
     let conn = open_db(cwd)?;
-
     conn.execute(
         "UPDATE workflow_runs SET status = 'completed', completed_at = ?1
          WHERE workflow_id = ?2",
         params![Utc::now().to_rfc3339(), workflow_id],
+    )?;
+    Ok(())
+}
+
+/// Marks the single active workflow as completed.
+#[allow(dead_code)]
+pub fn clear_state(cwd: &Path) -> Result<()> {
+    let conn = open_db(cwd)?;
+    let cwd_str = cwd.to_string_lossy();
+    conn.execute(
+        "UPDATE workflow_runs SET status = 'completed', completed_at = ?1
+         WHERE cwd = ?2 AND status = 'active'",
+        params![Utc::now().to_rfc3339(), cwd_str],
     )?;
     Ok(())
 }
@@ -294,7 +319,7 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "task1".to_string(),
-                name: "Task 1".to_string(),
+                description: Some("Task 1".to_string()),
                 ..Task::default()
             }],
         }
@@ -376,7 +401,7 @@ mod tests {
         task.status = StepStatus::InProgress;
         task.action_reports.push(ActionReport {
             action_index: 0,
-            action_type: "run".to_string(),
+            action_type: "agent".to_string(),
             exit_code: Some(0),
             stdout: Some("ok".to_string()),
             recorded_at: Utc::now(),
@@ -386,7 +411,58 @@ mod tests {
         let loaded = load_state(cwd).unwrap().unwrap();
         let reports = &loaded.tasks["task1"].action_reports;
         assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0].action_type, "run");
+        assert_eq!(reports[0].action_type, "agent");
         assert_eq!(reports[0].stdout.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn awaiting_approval_state_is_loadable() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+
+        let wf = minimal_workflow();
+        let state = WorkflowState::new("test", &wf);
+        let id = state.workflow_id.clone();
+        save_state(cwd, &state).unwrap();
+
+        set_workflow_status(cwd, &id, "awaiting_approval").unwrap();
+
+        // load_state should still find it.
+        let loaded = load_state(cwd).unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(get_workflow_status(cwd, &id).unwrap(), "awaiting_approval");
+    }
+
+    #[test]
+    fn set_workflow_status_updates_correctly() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+
+        let wf = minimal_workflow();
+        let state = WorkflowState::new("test", &wf);
+        let id = state.workflow_id.clone();
+        save_state(cwd, &state).unwrap();
+
+        assert_eq!(get_workflow_status(cwd, &id).unwrap(), "active");
+        set_workflow_status(cwd, &id, "awaiting_approval").unwrap();
+        assert_eq!(get_workflow_status(cwd, &id).unwrap(), "awaiting_approval");
+        set_workflow_status(cwd, &id, "active").unwrap();
+        assert_eq!(get_workflow_status(cwd, &id).unwrap(), "active");
+    }
+
+    #[test]
+    fn save_state_does_not_reset_awaiting_approval_status() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+
+        let wf = minimal_workflow();
+        let state = WorkflowState::new("test", &wf);
+        let id = state.workflow_id.clone();
+        save_state(cwd, &state).unwrap();
+
+        set_workflow_status(cwd, &id, "awaiting_approval").unwrap();
+        // Calling save_state again must NOT reset status back to 'active'.
+        save_state(cwd, &state).unwrap();
+        assert_eq!(get_workflow_status(cwd, &id).unwrap(), "awaiting_approval");
     }
 }

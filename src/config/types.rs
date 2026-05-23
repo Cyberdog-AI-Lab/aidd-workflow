@@ -10,7 +10,7 @@ pub struct Config {
     /// Additional YAML files to merge, relative to .workflow/
     #[serde(default)]
     pub imports: Vec<String>,
-    /// Named variables. Use `{{vars.<key>}}` in action prompts for interpolation.
+    /// Named variables. Use `{{vars.<key>}}` in task prompts for interpolation.
     #[serde(default)]
     pub vars: HashMap<String, String>,
     #[serde(default)]
@@ -28,31 +28,42 @@ pub struct Workflow {
 }
 
 /// One task in a workflow.
-/// Holds either `actions` or `agents`, never both.
-/// A task with neither is a manual task: Claude works from `description`.
+///
+/// Task modes (mutually exclusive; checked at runtime):
+/// - `prompt` and/or `skills`: automated task executed by an agent.
+/// - `agents`: parallel custom-agent task; each element is a name under `.claude/agents/`.
+/// - Neither: manual task — Claude works from `description` (required when manual).
 #[derive(Debug, Deserialize, Serialize, Clone, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Task {
     /// Unique task identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`
     #[schemars(schema_with = "kebab_id")]
     pub id: String,
-    pub name: String,
+    /// Human-readable description of the task. Required for manual tasks.
     pub description: Option<String>,
-    /// Actions to run automatically. Mutually exclusive with `agents` (checked at runtime).
+    /// Prompt sent to the agent. Supports `{{vars.<key>}}` interpolation.
+    /// Mutually exclusive with `agents`.
+    pub prompt: Option<String>,
+    /// Names of skills to invoke for this task. Mutually exclusive with `agents`.
     #[serde(default)]
-    pub actions: Vec<Action>,
-    /// Sub-agents to run concurrently. Mutually exclusive with `actions` (checked at runtime).
-    pub agents: Option<Vec<SubAgentTask>>,
+    pub skills: Vec<String>,
+    /// Names of custom agents (defined in `.claude/agents/<name>.md`) to spawn in parallel.
+    /// Mutually exclusive with `prompt` and `skills`.
+    #[serde(default)]
+    pub agents: Vec<String>,
     /// IDs of tasks that must complete before this task starts (checked at runtime).
     #[serde(default)]
     pub requires: Vec<String>,
-    /// File path patterns the agent is expected to create or modify as outputs (glob or /regex/).
+    /// File path patterns the agent is expected to create or modify (glob or /regex/).
     /// Non-empty list restricts editing to matching paths only while InProgress.
     #[serde(default)]
     pub outputs: Vec<String>,
     /// Explicit deny rules for files and shell commands.
     #[serde(default)]
     pub deny: Option<DenyRules>,
+    /// If true, pause the workflow after this task completes and wait for developer approval.
+    #[serde(default)]
+    pub approval: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default, JsonSchema)]
@@ -61,46 +72,9 @@ pub struct DenyRules {
     /// File path patterns forbidden from editing (glob or /regex/).
     #[serde(default)]
     pub files: Vec<String>,
-    /// Shell command patterns forbidden from running (substring match).
+    /// Shell command patterns forbidden from running (substring or /regex/ match).
     #[serde(default)]
     pub commands: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SubAgentTask {
-    /// Unique sub-agent identifier within the agents block. Pattern: `^[a-z][a-z0-9_-]*$`
-    #[schemars(schema_with = "kebab_id")]
-    pub id: String,
-    pub name: Option<String>,
-    pub description: Option<String>,
-    #[serde(default)]
-    pub actions: Vec<Action>,
-    /// IDs of other sub-agents within the same agents block that must complete first
-    /// (checked at runtime).
-    #[serde(default)]
-    pub requires: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Action {
-    Agent {
-        prompt: String,
-        /// When true, may run concurrently with other actions in the same task.
-        #[serde(default)]
-        background: bool,
-    },
-    Skill {
-        skill: String,
-        #[serde(default)]
-        args: Vec<String>,
-    },
-    Workflow {
-        workflow: String,
-        #[serde(default)]
-        inputs: HashMap<String, String>,
-    },
 }
 
 // Custom schema functions for constraints that schemars cannot derive automatically.
@@ -138,36 +112,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_defaults_empty_requires_and_actions() {
-        let yaml = r#"id: task1
-name: Task 1"#;
+    fn task_defaults_are_empty() {
+        let yaml = r#"id: task1"#;
         let task: Task = serde_yaml::from_str(yaml).unwrap();
         assert!(task.requires.is_empty());
-        assert!(task.actions.is_empty());
-        assert!(task.agents.is_none());
+        assert!(task.agents.is_empty());
+        assert!(task.skills.is_empty());
         assert!(task.outputs.is_empty());
         assert!(task.deny.is_none());
+        assert!(!task.approval);
+        assert!(task.prompt.is_none());
+        assert!(task.description.is_none());
     }
 
     #[test]
-    fn agent_task_requires_defaults_to_empty() {
-        let yaml = r#"id: sub1"#;
-        let sub: SubAgentTask = serde_yaml::from_str(yaml).unwrap();
-        assert!(sub.requires.is_empty());
+    fn task_parses_prompt_and_skills() {
+        let yaml = r#"id: impl
+description: Implement the feature
+prompt: "Do the implementation"
+skills:
+  - security-review
+approval: true"#;
+        let task: Task = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(task.prompt.as_deref(), Some("Do the implementation"));
+        assert_eq!(task.skills, vec!["security-review"]);
+        assert!(task.approval);
+        assert_eq!(task.description.as_deref(), Some("Implement the feature"));
     }
 
     #[test]
-    fn agent_task_requires_parses_list() {
-        let yaml = r#"id: sub2
-requires: [sub1]"#;
-        let sub: SubAgentTask = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(sub.requires, vec!["sub1"]);
+    fn task_parses_agents() {
+        let yaml = r#"id: parallel
+agents:
+  - run-test
+  - run-lint"#;
+        let task: Task = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(task.agents, vec!["run-test", "run-lint"]);
     }
 
     #[test]
     fn task_parses_outputs_and_deny() {
         let yaml = r#"id: s
-name: S
 outputs:
   - "src/**"
   - "/.*\\.md$/"
@@ -203,7 +188,6 @@ workflows: {}"#;
     #[test]
     fn task_rejects_unknown_field() {
         let yaml = r#"id: s1
-name: S1
 unknown_key: value"#;
         let result: Result<Task, _> = serde_yaml::from_str(yaml);
         assert!(result.is_err());

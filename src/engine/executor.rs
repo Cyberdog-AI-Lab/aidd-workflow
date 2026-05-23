@@ -1,7 +1,7 @@
-use crate::config::types::{Action, Config, Workflow};
+use crate::config::types::{Config, Workflow};
 use crate::engine::dag;
 use crate::engine::state::WorkflowState;
-use crate::protocol::output::{ActionItem, FlowStatus, ResolvedAction, WorkflowOutput};
+use crate::protocol::output::{FlowStatus, TaskOutput, WorkflowOutput};
 
 pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> WorkflowOutput {
     if dag::is_workflow_complete(wf, state) {
@@ -9,98 +9,44 @@ pub fn build_next(wf: &Workflow, state: &WorkflowState, config: &Config) -> Work
             workflow_id: state.workflow_id.clone(),
             workflow: state.workflow.clone(),
             status: FlowStatus::Completed,
-            actions: vec![],
+            tasks: vec![],
         };
     }
 
     let items = dag::executable_items(wf, state);
-    let mut actions = Vec::new();
+    let mut tasks = Vec::new();
 
     for item_id in &items {
-        if let Some(sep) = item_id.find('/') {
-            let parent_id = &item_id[..sep];
-            let sub_id = &item_id[sep + 1..];
-            let parent_task = wf.tasks.iter().find(|s| s.id == parent_id).unwrap();
-            let agents = parent_task.agents.as_deref().unwrap_or(&[]);
-            if let Some(sub) = agents.iter().find(|s| s.id == sub_id) {
-                let task_name = sub.name.as_deref().unwrap_or(sub_id);
-                if sub.actions.is_empty() {
-                    actions.push(ActionItem {
-                        task_id: item_id.clone(),
-                        action_index: 0,
-                        task_name: task_name.to_string(),
-                        sub_agent: true,
-                        action: ResolvedAction::Manual {
-                            description: sub.description.clone().unwrap_or_default(),
-                        },
-                    });
-                } else {
-                    for (i, action) in sub.actions.iter().enumerate() {
-                        actions.push(ActionItem {
-                            task_id: item_id.clone(),
-                            action_index: i,
-                            task_name: task_name.to_string(),
-                            sub_agent: true,
-                            action: resolve(action, config),
-                        });
-                    }
-                }
-            }
-        } else {
-            let task = wf.tasks.iter().find(|s| s.id == *item_id).unwrap();
-            if task.actions.is_empty() && task.agents.is_none() {
-                actions.push(ActionItem {
-                    task_id: item_id.clone(),
-                    action_index: 0,
-                    task_name: task.name.clone(),
-                    sub_agent: false,
-                    action: ResolvedAction::Manual {
-                        description: task.description.clone().unwrap_or_default(),
-                    },
-                });
-            } else {
-                for (i, action) in task.actions.iter().enumerate() {
-                    actions.push(ActionItem {
-                        task_id: item_id.clone(),
-                        action_index: i,
-                        task_name: task.name.clone(),
-                        sub_agent: false,
-                        action: resolve(action, config),
-                    });
-                }
-            }
-        }
+        let task = match wf.tasks.iter().find(|t| t.id == *item_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        tasks.push(TaskOutput {
+            task_id: task.id.clone(),
+            description: task.description.clone(),
+            prompt: task.prompt.as_deref().map(|p| resolve_template(p, config)),
+            skills: task.skills.clone(),
+            agents: task.agents.clone(),
+            outputs: task.outputs.clone(),
+            deny: task.deny.clone(),
+            approval: task.approval,
+        });
     }
 
     WorkflowOutput {
         workflow_id: state.workflow_id.clone(),
         workflow: state.workflow.clone(),
-        status: if actions.is_empty() {
+        status: if tasks.is_empty() {
             FlowStatus::Blocked
         } else {
             FlowStatus::InProgress
         },
-        actions,
+        tasks,
     }
 }
 
-fn resolve(action: &Action, config: &Config) -> ResolvedAction {
-    match action {
-        Action::Agent { prompt, background } => ResolvedAction::Agent {
-            prompt: resolve_template(prompt, config),
-            background: *background,
-        },
-        Action::Skill { skill, args } => ResolvedAction::Skill {
-            skill: skill.clone(),
-            args: args.clone(),
-        },
-        Action::Workflow { workflow, inputs } => ResolvedAction::Workflow {
-            workflow: workflow.clone(),
-            inputs: inputs.clone(),
-        },
-    }
-}
-
+/// Replaces `{{vars.<key>}}` placeholders with values from config.vars.
+/// Unknown keys are left as-is.
 pub fn resolve_template(s: &str, config: &Config) -> String {
     let mut result = s.to_string();
     for (key, value) in &config.vars {
@@ -112,13 +58,15 @@ pub fn resolve_template(s: &str, config: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Action, Config, SubAgentTask, Task, Workflow};
+    use crate::config::types::{Config, Task, Workflow};
     use crate::engine::state::{StepStatus, WorkflowState};
     use std::collections::HashMap;
 
-    fn config_with_test_cmd(cmd: &str) -> Config {
+    fn config_with_vars(pairs: &[(&str, &str)]) -> Config {
         let mut vars = HashMap::new();
-        vars.insert("test".to_string(), cmd.to_string());
+        for (k, v) in pairs {
+            vars.insert(k.to_string(), v.to_string());
+        }
         Config {
             imports: vec![],
             vars,
@@ -126,17 +74,13 @@ mod tests {
         }
     }
 
-    fn workflow_with_agent_action() -> Workflow {
+    fn workflow_with_prompt(prompt: &str) -> Workflow {
         Workflow {
             name: "test".to_string(),
             description: None,
             tasks: vec![Task {
                 id: "run".to_string(),
-                name: "Run".to_string(),
-                actions: vec![Action::Agent {
-                    prompt: "do the thing".to_string(),
-                    background: false,
-                }],
+                prompt: Some(prompt.to_string()),
                 ..Task::default()
             }],
         }
@@ -148,7 +92,6 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "design".to_string(),
-                name: "Design".to_string(),
                 description: Some("Write the design doc".to_string()),
                 ..Task::default()
             }],
@@ -156,112 +99,94 @@ mod tests {
     }
 
     #[test]
-    fn resolve_template_substitutes_command() {
-        let config = config_with_test_cmd("make test");
+    fn resolve_template_substitutes_var() {
+        let config = config_with_vars(&[("test", "make test")]);
         let result = resolve_template("{{vars.test}}", &config);
         assert_eq!(result, "make test");
     }
 
     #[test]
     fn resolve_template_leaves_unknown_key() {
-        let config = config_with_test_cmd("make test");
+        let config = config_with_vars(&[("test", "make test")]);
         let result = resolve_template("{{vars.build}}", &config);
         assert_eq!(result, "{{vars.build}}");
     }
 
     #[test]
-    fn build_next_returns_agent_action() {
-        let wf = workflow_with_agent_action();
-        let config = config_with_test_cmd("make test");
+    fn build_next_returns_task_with_resolved_prompt() {
+        let wf = workflow_with_prompt("run {{vars.test}}");
+        let config = config_with_vars(&[("test", "make test")]);
         let state = WorkflowState::new("test", &wf);
 
         let output = build_next(&wf, &state, &config);
-        assert_eq!(output.actions.len(), 1);
-        match &output.actions[0].action {
-            ResolvedAction::Agent { prompt, .. } => assert_eq!(prompt, "do the thing"),
-            _ => panic!("expected Agent"),
-        }
+        assert_eq!(output.tasks.len(), 1);
+        assert_eq!(output.tasks[0].prompt.as_deref(), Some("run make test"));
     }
 
     #[test]
-    fn build_next_returns_manual_with_description() {
+    fn build_next_returns_manual_task_with_description() {
         let wf = workflow_manual();
-        let config = config_with_test_cmd("make test");
+        let config = config_with_vars(&[]);
         let state = WorkflowState::new("test", &wf);
 
         let output = build_next(&wf, &state, &config);
-        assert_eq!(output.actions.len(), 1);
-        match &output.actions[0].action {
-            ResolvedAction::Manual { description } => {
-                assert_eq!(description, "Write the design doc");
-            }
-            _ => panic!("expected Manual"),
-        }
+        assert_eq!(output.tasks.len(), 1);
+        assert_eq!(
+            output.tasks[0].description.as_deref(),
+            Some("Write the design doc")
+        );
+        assert!(output.tasks[0].prompt.is_none());
+        assert!(output.tasks[0].agents.is_empty());
     }
 
     #[test]
-    fn agent_sub_task_actions_have_sub_agent_true() {
+    fn build_next_returns_agents_list() {
         let wf = Workflow {
             name: "test".to_string(),
             description: None,
             tasks: vec![Task {
-                id: "p".to_string(),
-                name: "Parallel".to_string(),
-                description: None,
-                actions: vec![],
-                agents: Some(vec![
-                    SubAgentTask {
-                        id: "x".to_string(),
-                        name: None,
-                        description: None,
-                        actions: vec![Action::Agent {
-                            prompt: "do x".to_string(),
-                            background: false,
-                        }],
-                        requires: vec![],
-                    },
-                    SubAgentTask {
-                        id: "y".to_string(),
-                        name: None,
-                        description: None,
-                        actions: vec![Action::Agent {
-                            prompt: "do y".to_string(),
-                            background: false,
-                        }],
-                        requires: vec![],
-                    },
-                ]),
+                id: "parallel".to_string(),
+                agents: vec!["run-test".to_string(), "run-lint".to_string()],
                 ..Task::default()
             }],
         };
-        let config = config_with_test_cmd("make test");
+        let config = config_with_vars(&[]);
         let state = WorkflowState::new("test", &wf);
 
         let output = build_next(&wf, &state, &config);
-        assert_eq!(output.actions.len(), 2);
-        assert!(output.actions[0].sub_agent);
-        assert!(output.actions[1].sub_agent);
-    }
-
-    #[test]
-    fn sequential_task_action_has_sub_agent_false() {
-        let wf = workflow_with_agent_action();
-        let config = config_with_test_cmd("make test");
-        let state = WorkflowState::new("test", &wf);
-
-        let output = build_next(&wf, &state, &config);
-        assert!(!output.actions[0].sub_agent);
+        assert_eq!(output.tasks.len(), 1);
+        assert_eq!(output.tasks[0].task_id, "parallel");
+        assert_eq!(output.tasks[0].agents, vec!["run-test", "run-lint"]);
     }
 
     #[test]
     fn build_next_returns_completed_when_all_done() {
-        let wf = workflow_with_agent_action();
-        let config = config_with_test_cmd("make test");
+        let wf = workflow_with_prompt("do the thing");
+        let config = config_with_vars(&[]);
         let mut state = WorkflowState::new("test", &wf);
         state.tasks.get_mut("run").unwrap().status = StepStatus::Completed;
 
         let output = build_next(&wf, &state, &config);
         assert!(matches!(output.status, FlowStatus::Completed));
-        assert!(output.actions.is_empty());
+        assert!(output.tasks.is_empty());
+    }
+
+    #[test]
+    fn build_next_includes_approval_flag() {
+        let wf = Workflow {
+            name: "test".to_string(),
+            description: None,
+            tasks: vec![Task {
+                id: "impl".to_string(),
+                prompt: Some("implement it".to_string()),
+                approval: true,
+                ..Task::default()
+            }],
+        };
+        let config = config_with_vars(&[]);
+        let state = WorkflowState::new("test", &wf);
+
+        let output = build_next(&wf, &state, &config);
+        assert!(output.tasks[0].approval);
     }
 }

@@ -1,234 +1,161 @@
 {
-	"$schema": "http://json-schema.org/draft-07/schema#",
-	"title": "Config",
-	"description": "Root config.yml or any import file for workflow-runner. All top-level keys are optional in individual files; they are merged before validation.",
-	"type": "object",
-	"properties": {
-		"vars": {
-			"description": "Named variables. Use `{{vars.<key>}}` in action prompts for interpolation.",
-			"default": {},
-			"type": "object",
-			"additionalProperties": {
-				"type": "string"
-			}
-		},
-		"imports": {
-			"description": "Additional YAML files to merge, relative to .workflow/",
-			"default": [],
-			"type": "array",
-			"items": {
-				"type": "string"
-			}
-		},
-		"workflows": {
-			"default": {},
-			"type": "object",
-			"additionalProperties": {
-				"$ref": "#/definitions/Workflow"
-			}
-		}
-	},
-	"additionalProperties": false,
-	"definitions": {
-		"Action": {
-			"oneOf": [
-				{
-					"type": "object",
-					"required": ["prompt", "type"],
-					"properties": {
-						"background": {
-							"description": "When true, may run concurrently with other actions in the same task.",
-							"default": false,
-							"type": "boolean"
-						},
-						"prompt": {
-							"type": "string"
-						},
-						"type": {
-							"type": "string",
-							"enum": ["agent"]
-						}
-					}
-				},
-				{
-					"type": "object",
-					"required": ["skill", "type"],
-					"properties": {
-						"args": {
-							"default": [],
-							"type": "array",
-							"items": {
-								"type": "string"
-							}
-						},
-						"skill": {
-							"type": "string"
-						},
-						"type": {
-							"type": "string",
-							"enum": ["skill"]
-						}
-					}
-				},
-				{
-					"type": "object",
-					"required": ["type", "workflow"],
-					"properties": {
-						"inputs": {
-							"default": {},
-							"type": "object",
-							"additionalProperties": {
-								"type": "string"
-							}
-						},
-						"type": {
-							"type": "string",
-							"enum": ["workflow"]
-						},
-						"workflow": {
-							"type": "string"
-						}
-					}
-				}
-			]
-		},
-		"SubAgentTask": {
-			"type": "object",
-			"required": ["id"],
-			"properties": {
-				"actions": {
-					"default": [],
-					"type": "array",
-					"items": {
-						"$ref": "#/definitions/Action"
-					}
-				},
-				"description": {
-					"type": ["string", "null"]
-				},
-				"id": {
-					"description": "Unique sub-agent identifier within the agents block. Pattern: `^[a-z][a-z0-9_-]*$`",
-					"type": "string",
-					"pattern": "^[a-z][a-z0-9_-]*$"
-				},
-				"name": {
-					"type": ["string", "null"]
-				},
-				"requires": {
-					"description": "IDs of other sub-agents within the same agents block that must complete first (checked at runtime).",
-					"default": [],
-					"type": "array",
-					"items": {
-						"type": "string"
-					}
-				}
-			},
-			"additionalProperties": false
-		},
-		"DenyRules": {
-			"type": "object",
-			"properties": {
-				"commands": {
-					"description": "Shell command patterns forbidden from running (substring match).",
-					"default": [],
-					"type": "array",
-					"items": {
-						"type": "string"
-					}
-				},
-				"files": {
-					"description": "File path patterns forbidden from editing (glob or /regex/).",
-					"default": [],
-					"type": "array",
-					"items": {
-						"type": "string"
-					}
-				}
-			},
-			"additionalProperties": false
-		},
-		"Task": {
-			"description": "One task in a workflow. Holds either `actions` or `agents`, never both. A task with neither is a manual task: Claude works from `description`.",
-			"type": "object",
-			"required": ["id", "name"],
-			"properties": {
-				"actions": {
-					"description": "Actions to run automatically. Mutually exclusive with `agents` (checked at runtime).",
-					"default": [],
-					"type": "array",
-					"items": {
-						"$ref": "#/definitions/Action"
-					}
-				},
-				"agents": {
-					"description": "Sub-agents to run concurrently. Mutually exclusive with `actions` (checked at runtime).",
-					"type": ["array", "null"],
-					"items": {
-						"$ref": "#/definitions/SubAgentTask"
-					}
-				},
-				"outputs": {
-					"description": "File path patterns the agent is expected to create or modify as outputs (glob or /regex/). Non-empty list restricts editing to matching paths only while InProgress.",
-					"default": [],
-					"type": "array",
-					"items": {
-						"type": "string"
-					}
-				},
-				"deny": {
-					"description": "Explicit deny rules for files and shell commands.",
-					"default": null,
-					"anyOf": [
-						{
-							"$ref": "#/definitions/DenyRules"
-						},
-						{
-							"type": "null"
-						}
-					]
-				},
-				"description": {
-					"type": ["string", "null"]
-				},
-				"id": {
-					"description": "Unique task identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`",
-					"type": "string",
-					"pattern": "^[a-z][a-z0-9_-]*$"
-				},
-				"name": {
-					"type": "string"
-				},
-				"requires": {
-					"description": "IDs of tasks that must complete before this task starts (checked at runtime).",
-					"default": [],
-					"type": "array",
-					"items": {
-						"type": "string"
-					}
-				}
-			},
-			"additionalProperties": false
-		},
-		"Workflow": {
-			"type": "object",
-			"required": ["name", "tasks"],
-			"properties": {
-				"description": {
-					"type": ["string", "null"]
-				},
-				"name": {
-					"type": "string"
-				},
-				"tasks": {
-					"description": "Tasks to execute. At least one task is required (checked at runtime).",
-					"type": "array",
-					"items": {
-						"$ref": "#/definitions/Task"
-					},
-					"minItems": 1
-				}
-			},
-			"additionalProperties": false
-		}
-	}
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Config",
+  "description": "Root config.yml or any import file for workflow-runner. All top-level keys are optional in individual files; they are merged before validation.",
+  "type": "object",
+  "properties": {
+    "imports": {
+      "description": "Additional YAML files to merge, relative to .workflow/",
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "vars": {
+      "description": "Named variables. Use `{{vars.<key>}}` in task prompts for interpolation.",
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "workflows": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/Workflow"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "DenyRules": {
+      "type": "object",
+      "properties": {
+        "commands": {
+          "description": "Shell command patterns forbidden from running (substring or /regex/ match).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "files": {
+          "description": "File path patterns forbidden from editing (glob or /regex/).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Task": {
+      "description": "One task in a workflow.\n\nTask modes (mutually exclusive; checked at runtime): - `prompt` and/or `skills`: automated task executed by an agent. - `agents`: parallel custom-agent task; each element is a name under `.claude/agents/`. - Neither: manual task — Claude works from `description` (required when manual).",
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "agents": {
+          "description": "Names of custom agents (defined in `.claude/agents/<name>.md`) to spawn in parallel. Mutually exclusive with `prompt` and `skills`.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "approval": {
+          "description": "If true, pause the workflow after this task completes and wait for developer approval.",
+          "default": false,
+          "type": "boolean"
+        },
+        "deny": {
+          "description": "Explicit deny rules for files and shell commands.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DenyRules"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "description": "Human-readable description of the task. Required for manual tasks.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique task identifier within the workflow. Pattern: `^[a-z][a-z0-9_-]*$`",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "outputs": {
+          "description": "File path patterns the agent is expected to create or modify (glob or /regex/). Non-empty list restricts editing to matching paths only while InProgress.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prompt": {
+          "description": "Prompt sent to the agent. Supports `{{vars.<key>}}` interpolation. Mutually exclusive with `agents`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requires": {
+          "description": "IDs of tasks that must complete before this task starts (checked at runtime).",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "skills": {
+          "description": "Names of skills to invoke for this task. Mutually exclusive with `agents`.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Workflow": {
+      "type": "object",
+      "required": [
+        "name",
+        "tasks"
+      ],
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "tasks": {
+          "description": "Tasks to execute. At least one task is required (checked at runtime).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Task"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

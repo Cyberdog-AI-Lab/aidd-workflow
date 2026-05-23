@@ -4,10 +4,10 @@
 
 # 他ファイルへの分割（imports: で複数ファイルに切り出せる）
 # imports:
-#   - commands/default.yml
+#   - vars/default.yml
 #   - workflows/extra.yml
 
-# プロジェクト固有の変数定義（Makefile の target 名を登録する）
+# プロジェクト固有の変数定義（Makefile の target 名などを登録する）
 vars:
   test: make test
   lint: make lint
@@ -20,23 +20,23 @@ workflows:
     description: バグを再現・特定し、修正・テストまで完走するフロー
     tasks:
       - id: reproduce
-        name: 再現確認
         description: バグを手元で再現し、再現手順（環境・操作・期待値・実際の挙動）を記録する
+        # prompt/skills/agents なし → 手動タスク（description 必須）
 
       - id: identify
-        name: 原因特定
         description: 原因となるファイル・関数・行を特定して記録する
 
       - id: implement
-        name: 修正実装
         description: 最小限の変更でバグを修正する。影響範囲を意識すること
+        prompt: |
+          原因特定の結果に基づき、最小限の変更でバグを修正してください。
+          修正後は {{vars.test}} を実行してテストがすべてパスすることを確認してください。
         outputs:
           - "src/**"
           - "tests/**"
         requires: [reproduce, identify]
 
       - id: complete
-        name: 完了判定
         description: すべてのタスクが完了したことを確認し、作業を完了とマークする
         requires: [implement]
 
@@ -45,15 +45,17 @@ workflows:
     description: 新機能を設計・実装・テストするフロー
     tasks:
       - id: design
-        name: 設計確認
         description: 実装方針・影響範囲・インターフェースを整理して記録する
         outputs:
           - "docs/**"
           - "/.*\\.md$/"
+        approval: true   # 設計完了後に開発者の承認を得てから実装へ進む
 
       - id: implement
-        name: 実装
         description: 設計に従って実装する
+        prompt: |
+          設計書に従って実装してください。
+          実装後は {{vars.test}} と {{vars.lint}} を実行して品質を確認してください。
         outputs:
           - "src/**"
           - "tests/**"
@@ -63,7 +65,6 @@ workflows:
         requires: [design]
 
       - id: complete
-        name: 完了判定
         description: 実装・テストが完了したことを確認する
         requires: [implement]
 
@@ -72,35 +73,29 @@ workflows:
     description: 設計・実装・品質チェック（並列）まで完走するフロー
     tasks:
       - id: design
-        name: 設計確認
         description: 実装方針・影響範囲・インターフェースを整理して記録する
         outputs:
           - "docs/**"
+        approval: true
 
       - id: implement
-        name: 実装
         description: 設計に従って実装する
-        requires: [design]
+        prompt: |
+          設計書に従って実装してください。
+          実装後は {{vars.build}} でビルドを確認してください。
         outputs:
           - "src/**"
           - "tests/**"
+        requires: [design]
 
       - id: quality-check
-        name: 品質チェック（並列）
+        description: テストと Lint を並列で実行する
         requires: [implement]
         agents:
-          - id: run-test
-            name: テスト実行
-            actions:
-              - type: agent
-                prompt: "{{vars.test}} を実行してテストがすべてパスすることを確認してください"
-          - id: run-lint
-            name: Lint
-            actions:
-              - type: agent
-                prompt: "{{vars.lint}} を実行して Lint が通ることを確認してください"
+          - run-test    # → .claude/agents/run-test.md を参照
+          - run-lint    # → .claude/agents/run-lint.md を参照
 
       - id: complete
-        name: 完了判定
         description: 設計・実装・品質チェックが完了したことを確認する
         requires: [quality-check]
+        approval: true

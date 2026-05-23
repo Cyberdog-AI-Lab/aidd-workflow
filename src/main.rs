@@ -14,13 +14,16 @@ use std::path::{Path, PathBuf};
 use adapters::hooks::hook_handler;
 use config::loader::{load_config, validate as validate_config};
 use engine::state::{ActionReport, StepStatus, WorkflowState};
-use engine::store::{clear_state_by_id, load_state, load_state_by_id, save_state};
+use engine::store::{
+    clear_state_by_id, get_workflow_status, load_state, load_state_by_id, save_state,
+    set_workflow_status,
+};
 use engine::{dag, executor, gate};
 use protocol::{
     input::ReportInput,
     output::{
         build_status, format_status_table, format_validate_text, CompleteOutput, ErrorOutput,
-        FlowStatus, ValidateOutput, WorkflowListItem,
+        FlowStatus, RejectOutput, ValidateOutput, WorkflowListItem, WorkflowOutput,
     },
 };
 
@@ -44,17 +47,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start a workflow and return the first set of actions.
+    /// Start a workflow and return the first set of tasks.
     Start { workflow: String },
-    /// Return the next set of actions from the current state.
+    /// Return the next set of tasks. When awaiting approval, calling this approves and proceeds.
     Next,
-    /// Record an action execution result (stdin: JSON).
+    /// Record a task execution result (stdin: JSON).
     Report,
     /// Mark a task as complete (with gate check).
     Complete { task_id: String },
+    /// Reject an awaiting-approval task and retry it.
+    Reject {
+        task_id: String,
+        /// Developer feedback explaining the rejection.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Return resume information for an interrupted workflow.
     Resume,
-    /// Return the current execution state as JSON.
+    /// Return the current execution state.
     Status {
         /// Output format: json (default) or table
         #[arg(long, default_value = "json", value_parser = ["json", "table"])]
@@ -109,6 +119,9 @@ fn run(cmd: Commands, cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
         Commands::Next => cmd_next(cwd, workflow_id),
         Commands::Report => cmd_report(cwd, workflow_id),
         Commands::Complete { task_id } => cmd_complete(cwd, &task_id, workflow_id),
+        Commands::Reject { task_id, reason } => {
+            cmd_reject(cwd, &task_id, reason.as_deref(), workflow_id)
+        }
         Commands::Resume => cmd_resume(cwd, workflow_id),
         Commands::Status { format } => cmd_status(cwd, &format, workflow_id),
         Commands::Validate { format } => cmd_validate(cwd, &format),
@@ -152,6 +165,12 @@ fn cmd_next(cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
         .workflows
         .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found in config.yml", state.workflow))?;
+
+    // When awaiting approval, calling `next` acts as approval: clear the gate and proceed.
+    let wf_status = get_workflow_status(cwd, &state.workflow_id)?;
+    if wf_status == "awaiting_approval" {
+        set_workflow_status(cwd, &state.workflow_id, "active")?;
+    }
 
     let output = executor::build_next(wf, &state, &config);
     Ok(serde_json::to_string_pretty(&output)?)
@@ -230,6 +249,27 @@ fn cmd_complete(cwd: &Path, task_id: &str, workflow_id: Option<&str>) -> Result<
 
     save_state(cwd, &state)?;
 
+    // For parent tasks (not sub-agents): check approval flag.
+    if dag::parent_of(task_id).is_none() {
+        if let Some(task_cfg) = wf.tasks.iter().find(|t| t.id == task_id) {
+            if task_cfg.approval {
+                set_workflow_status(cwd, &state.workflow_id, "awaiting_approval")?;
+                let output = CompleteOutput {
+                    task_id: task_id.to_string(),
+                    allowed: true,
+                    reason: None,
+                    next: Some(WorkflowOutput {
+                        workflow_id: state.workflow_id.clone(),
+                        workflow: state.workflow.clone(),
+                        status: FlowStatus::AwaitingApproval,
+                        tasks: vec![],
+                    }),
+                };
+                return Ok(serde_json::to_string_pretty(&output)?);
+            }
+        }
+    }
+
     let next = executor::build_next(wf, &state, &config);
     if matches!(next.status, FlowStatus::Completed) {
         clear_state_by_id(cwd, &state.workflow_id)?;
@@ -240,6 +280,75 @@ fn cmd_complete(cwd: &Path, task_id: &str, workflow_id: Option<&str>) -> Result<
         allowed: true,
         reason: None,
         next: Some(next),
+    };
+    Ok(serde_json::to_string_pretty(&output)?)
+}
+
+fn cmd_reject(
+    cwd: &Path,
+    task_id: &str,
+    reason: Option<&str>,
+    workflow_id: Option<&str>,
+) -> Result<String> {
+    let config = load_config(cwd)?;
+    let mut state = resolve_state(cwd, workflow_id)?
+        .context("no workflow in progress (or not awaiting approval)")?;
+    let wf = config
+        .workflows
+        .get(&state.workflow)
+        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
+
+    let wf_status = get_workflow_status(cwd, &state.workflow_id)?;
+    if wf_status != "awaiting_approval" {
+        anyhow::bail!(
+            "workflow is not awaiting approval (current status: {}); nothing to reject",
+            wf_status
+        );
+    }
+
+    // Reset task to InProgress and record rejection reason.
+    {
+        let s = state.tasks.entry(task_id.to_string()).or_default();
+        s.status = StepStatus::InProgress;
+        s.completed_at = None;
+        if let Some(reason_str) = reason {
+            s.action_reports.push(ActionReport {
+                action_index: s.action_reports.len(),
+                action_type: "reject".to_string(),
+                exit_code: None,
+                stdout: Some(reason_str.to_string()),
+                recorded_at: Utc::now(),
+            });
+        }
+    }
+
+    // Clear the approval gate.
+    set_workflow_status(cwd, &state.workflow_id, "active")?;
+    save_state(cwd, &state)?;
+
+    // Build the task output for re-dispatch.
+    let task_output =
+        wf.tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .map(|task| protocol::output::TaskOutput {
+                task_id: task.id.clone(),
+                description: task.description.clone(),
+                prompt: task
+                    .prompt
+                    .as_deref()
+                    .map(|p| executor::resolve_template(p, &config)),
+                skills: task.skills.clone(),
+                agents: task.agents.clone(),
+                outputs: task.outputs.clone(),
+                deny: task.deny.clone(),
+                approval: task.approval,
+            });
+
+    let output = RejectOutput {
+        task_id: task_id.to_string(),
+        reason: reason.map(str::to_string),
+        task: task_output,
     };
     Ok(serde_json::to_string_pretty(&output)?)
 }

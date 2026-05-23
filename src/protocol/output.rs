@@ -1,15 +1,14 @@
-use crate::config::types::Workflow;
+use crate::config::types::{DenyRules, Workflow};
 use crate::engine::state::WorkflowState;
 use serde::Serialize;
-use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
 pub struct WorkflowOutput {
     pub workflow_id: String,
     pub workflow: String,
     pub status: FlowStatus,
-    /// Actions to execute next; may contain multiple items for concurrent execution.
-    pub actions: Vec<ActionItem>,
+    /// Tasks to execute next; may contain multiple items for concurrent execution.
+    pub tasks: Vec<TaskOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -19,39 +18,28 @@ pub enum FlowStatus {
     InProgress,
     Completed,
     Blocked,
+    /// Workflow is paused; call `next` to approve or `reject <task-id>` to retry.
+    AwaitingApproval,
 }
 
+/// Output for a single executable task returned to the skill layer.
 #[derive(Debug, Serialize)]
-pub struct ActionItem {
+pub struct TaskOutput {
     pub task_id: String,
-    pub action_index: usize,
-    /// Display name of the task.
-    pub task_name: String,
-    /// When true, this item is part of an agents block and must be run as a sub-agent.
-    pub sub_agent: bool,
-    #[serde(flatten)]
-    pub action: ResolvedAction,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ResolvedAction {
-    Agent {
-        prompt: String,
-        background: bool,
-    },
-    Skill {
-        skill: String,
-        args: Vec<String>,
-    },
-    Workflow {
-        workflow: String,
-        inputs: HashMap<String, String>,
-    },
-    /// Task with no actions and no agents block; Claude works from the description.
-    Manual {
-        description: String,
-    },
+    /// Full description of the task (used as display name and for manual tasks).
+    pub description: Option<String>,
+    /// Prompt for the agent. None for agent-block or manual tasks.
+    pub prompt: Option<String>,
+    /// Skills to invoke for this task.
+    pub skills: Vec<String>,
+    /// Custom agent names (from `.claude/agents/`) to spawn in parallel.
+    pub agents: Vec<String>,
+    /// File path patterns this task may write to.
+    pub outputs: Vec<String>,
+    /// Deny rules active while this task is InProgress.
+    pub deny: Option<DenyRules>,
+    /// Whether developer approval is required after this task completes.
+    pub approval: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,8 +47,17 @@ pub struct CompleteOutput {
     pub task_id: String,
     pub allowed: bool,
     pub reason: Option<String>,
-    /// Next actions when allowed = true.
+    /// Next state when allowed = true.
     pub next: Option<WorkflowOutput>,
+}
+
+/// Response to `reject <task-id>`: returns the task to retry.
+#[derive(Debug, Serialize)]
+pub struct RejectOutput {
+    pub task_id: String,
+    pub reason: Option<String>,
+    /// The task definition for re-dispatch.
+    pub task: Option<TaskOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,7 +71,8 @@ pub struct StatusOutput {
 #[derive(Debug, Serialize)]
 pub struct TaskStatusItem {
     pub id: String,
-    pub name: String,
+    /// Full description shown in status display.
+    pub description: String,
     pub status: String,
 }
 
@@ -126,12 +124,12 @@ pub fn format_status_table(output: &StatusOutput) -> String {
 
     let mut table = Table::new();
     table.load_preset(UTF8_BORDERS_ONLY);
-    table.set_header(vec!["TASK ID", "NAME", "STATUS"]);
+    table.set_header(vec!["TASK ID", "DESCRIPTION", "STATUS"]);
 
     for task in &output.tasks {
         table.add_row(vec![
             task.id.as_str(),
-            task.name.as_str(),
+            task.description.as_str(),
             task.status.as_str(),
         ]);
     }
@@ -152,24 +150,22 @@ pub fn build_status(state: &WorkflowState, wf: &Workflow) -> StatusOutput {
             .unwrap_or_else(|| "pending".to_string());
         tasks.push(TaskStatusItem {
             id: task.id.clone(),
-            name: task.name.clone(),
+            description: task.description.clone().unwrap_or_default(),
             status,
         });
-        if let Some(agents) = &task.agents {
-            for sub in agents {
-                let key = format!("{}/{}", task.id, sub.id);
-                let sub_status = state
-                    .tasks
-                    .get(&key)
-                    .map(|s| format!("{:?}", s.status).to_lowercase())
-                    .unwrap_or_else(|| "pending".to_string());
-                let sub_name = sub.name.as_deref().unwrap_or(&sub.id).to_string();
-                tasks.push(TaskStatusItem {
-                    id: key,
-                    name: sub_name,
-                    status: sub_status,
-                });
-            }
+        // Sub-agents tracked as "parent_id/agent_name" keys.
+        for agent_name in &task.agents {
+            let key = format!("{}/{}", task.id, agent_name);
+            let sub_status = state
+                .tasks
+                .get(&key)
+                .map(|s| format!("{:?}", s.status).to_lowercase())
+                .unwrap_or_else(|| "pending".to_string());
+            tasks.push(TaskStatusItem {
+                id: key,
+                description: format!("agent: {}", agent_name),
+                status: sub_status,
+            });
         }
     }
 
@@ -193,7 +189,7 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "s1".to_string(),
-                name: "S1".to_string(),
+                description: Some("Step 1".to_string()),
                 ..Task::default()
             }],
         }
@@ -219,30 +215,22 @@ mod tests {
     }
 
     #[test]
+    fn build_status_uses_description_as_display() {
+        let wf = minimal_workflow();
+        let state = WorkflowState::new("test", &wf);
+        let out = build_status(&state, &wf);
+        assert_eq!(out.tasks[0].description, "Step 1");
+    }
+
+    #[test]
     fn build_status_includes_agent_sub_tasks() {
-        use crate::config::types::SubAgentTask;
         let wf = Workflow {
             name: "test".to_string(),
             description: None,
             tasks: vec![Task {
                 id: "p".to_string(),
-                name: "Parallel".to_string(),
-                agents: Some(vec![
-                    SubAgentTask {
-                        id: "a".to_string(),
-                        name: Some("A".to_string()),
-                        description: None,
-                        actions: vec![],
-                        requires: vec![],
-                    },
-                    SubAgentTask {
-                        id: "b".to_string(),
-                        name: None,
-                        description: None,
-                        actions: vec![],
-                        requires: vec![],
-                    },
-                ]),
+                description: Some("Parallel".to_string()),
+                agents: vec!["run-test".to_string(), "run-lint".to_string()],
                 ..Task::default()
             }],
         };
@@ -250,10 +238,10 @@ mod tests {
         let out = build_status(&state, &wf);
         // parent + 2 sub-agents
         assert_eq!(out.tasks.len(), 3);
-        assert_eq!(out.tasks[1].id, "p/a");
-        assert_eq!(out.tasks[1].name, "A");
-        assert_eq!(out.tasks[2].id, "p/b");
-        assert_eq!(out.tasks[2].name, "b");
+        assert_eq!(out.tasks[1].id, "p/run-test");
+        assert_eq!(out.tasks[1].description, "agent: run-test");
+        assert_eq!(out.tasks[2].id, "p/run-lint");
+        assert_eq!(out.tasks[2].description, "agent: run-lint");
     }
 
     #[test]

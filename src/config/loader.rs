@@ -24,7 +24,7 @@ impl std::fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 /// Loads and merges config from `.workflow/config.yml` and any `imports`.
-/// Validation (including `vars.test` check) runs only on the fully merged config.
+/// Validation runs only on the fully merged config.
 pub fn load_config(cwd: &Path) -> Result<Config> {
     let root = cwd.join(".workflow/config.yml");
     let config = load_config_recursive(&root, cwd, &mut HashSet::new())?;
@@ -82,12 +82,25 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
         let ids: HashSet<&str> = wf.tasks.iter().map(|s| s.id.as_str()).collect();
 
         for task in &wf.tasks {
-            if !task.actions.is_empty() && task.agents.is_some() {
+            // prompt/skills and agents are mutually exclusive.
+            if (task.prompt.is_some() || !task.skills.is_empty()) && !task.agents.is_empty() {
                 errors.push(format!(
-                    "task '{}' in workflow '{}': cannot have both actions and agents",
+                    "task '{}' in workflow '{}': 'prompt'/'skills' and 'agents' are mutually exclusive",
                     task.id, slug
                 ));
             }
+
+            // Manual tasks (no prompt, skills, or agents) require a description.
+            let is_manual =
+                task.prompt.is_none() && task.skills.is_empty() && task.agents.is_empty();
+            if is_manual && task.description.is_none() {
+                errors.push(format!(
+                    "task '{}' in workflow '{}': manual task requires 'description'",
+                    task.id, slug
+                ));
+            }
+
+            // All requires must reference known task IDs.
             for req in &task.requires {
                 if !ids.contains(req.as_str()) {
                     errors.push(format!(
@@ -128,7 +141,7 @@ mod tests {
     fn minimal_config() -> Config {
         let task = Task {
             id: "task1".to_string(),
-            name: "Task 1".to_string(),
+            description: Some("Do task 1".to_string()),
             ..Task::default()
         };
         let mut workflows = HashMap::new();
@@ -169,41 +182,59 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_both_actions_and_agents() {
-        use crate::config::types::{Action, SubAgentTask};
+    fn validate_rejects_prompt_and_agents_together() {
         let mut config = minimal_config();
         let wf = config.workflows.get_mut("wf").unwrap();
-        wf.tasks[0].actions = vec![Action::Agent {
-            prompt: "do it".to_string(),
-            background: false,
-        }];
-        wf.tasks[0].agents = Some(vec![SubAgentTask {
-            id: "sub1".to_string(),
-            name: None,
-            description: None,
-            actions: vec![],
-            requires: vec![],
-        }]);
+        wf.tasks[0].prompt = Some("do it".to_string());
+        wf.tasks[0].agents = vec!["some-agent".to_string()];
         assert!(validate(&config).is_err());
     }
 
     #[test]
+    fn validate_rejects_skills_and_agents_together() {
+        let mut config = minimal_config();
+        let wf = config.workflows.get_mut("wf").unwrap();
+        wf.tasks[0].skills = vec!["security-review".to_string()];
+        wf.tasks[0].agents = vec!["some-agent".to_string()];
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_manual_task_without_description() {
+        let mut config = minimal_config();
+        let wf = config.workflows.get_mut("wf").unwrap();
+        wf.tasks[0].description = None; // remove description from manual task
+        let err = validate(&config).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("manual task requires 'description'"));
+    }
+
+    #[test]
+    fn validate_accepts_prompt_task_without_description() {
+        let mut config = minimal_config();
+        let wf = config.workflows.get_mut("wf").unwrap();
+        wf.tasks[0].description = None;
+        wf.tasks[0].prompt = Some("Do something".to_string());
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_agents_task_without_description() {
+        let mut config = minimal_config();
+        let wf = config.workflows.get_mut("wf").unwrap();
+        wf.tasks[0].description = None;
+        wf.tasks[0].agents = vec!["run-test".to_string()];
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
     fn validate_collects_multiple_errors() {
-        use crate::config::types::{Action, SubAgentTask};
         let mut config = minimal_config();
         let wf = config.workflows.get_mut("wf").unwrap();
         wf.tasks[0].requires.push("missing".to_string());
-        wf.tasks[0].actions = vec![Action::Agent {
-            prompt: "do it".to_string(),
-            background: false,
-        }];
-        wf.tasks[0].agents = Some(vec![SubAgentTask {
-            id: "sub1".to_string(),
-            name: None,
-            description: None,
-            actions: vec![],
-            requires: vec![],
-        }]);
+        wf.tasks[0].prompt = Some("do it".to_string());
+        wf.tasks[0].agents = vec!["some-agent".to_string()];
         let err = validate(&config).unwrap_err();
         assert!(
             err.errors.len() >= 2,
@@ -238,35 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn load_config_rejects_action_run_via_yaml() {
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
-        let workflow_dir = dir.path().join(".workflow");
-        std::fs::create_dir_all(&workflow_dir).unwrap();
-
-        let yaml = r#"
-workflows:
-  wf:
-    name: WF
-    tasks:
-      - id: s
-        name: S
-        actions:
-          - type: run
-            command: make test
-"#;
-        std::fs::write(workflow_dir.join("config.yml"), yaml).unwrap();
-
-        // type: run is no longer a valid Action variant; serde_yaml rejects it at parse time.
-        let result = load_config(dir.path());
-        assert!(
-            result.is_err(),
-            "expected parse error for deprecated Action::Run"
-        );
-    }
-
-    #[test]
     fn load_config_resolves_imports() {
         use tempfile::tempdir;
 
@@ -283,7 +285,7 @@ workflows:
     name: Extra
     tasks:
       - id: e1
-        name: E1
+        description: Extra task 1
 "#,
         )
         .unwrap();
@@ -297,7 +299,7 @@ workflows:
     name: Main
     tasks:
       - id: m1
-        name: M1
+        description: Main task 1
 "#,
         )
         .unwrap();
@@ -316,7 +318,6 @@ workflows:
         let wf_dir = dir.path().join(".workflow");
         std::fs::create_dir_all(&wf_dir).unwrap();
 
-        // a.yml imports b.yml, b.yml imports a.yml
         std::fs::write(
             wf_dir.join("a.yml"),
             r#"imports:
@@ -340,7 +341,7 @@ workflows:
     name: WF
     tasks:
       - id: s1
-        name: S1
+        description: Step 1
 "#,
         )
         .unwrap();

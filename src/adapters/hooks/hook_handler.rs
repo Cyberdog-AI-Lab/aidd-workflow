@@ -78,7 +78,7 @@ pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
                     "decision": "ask",
                     "reason": format!(
                         "[{}] '{}' is outside outputs for task '{}'",
-                        task.id, rel_path, task.name
+                        task.id, rel_path, task.id
                     )
                 });
                 return Ok(Some(decision.to_string()));
@@ -93,7 +93,7 @@ pub fn handle_pre_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
                         "decision": "block",
                         "reason": format!(
                             "[{}] editing '{}' is denied by task '{}' (rule: '{}')",
-                            task.id, rel_path, task.name, pattern
+                            task.id, rel_path, task.id, pattern
                         )
                     });
                     return Ok(Some(decision.to_string()));
@@ -146,7 +146,7 @@ pub fn handle_pre_bash(cwd: &Path, hook_json: &str) -> Result<Option<String>> {
                         "decision": "block",
                         "reason": format!(
                             "[{}] command '{}' is denied by task '{}' (rule: '{}')",
-                            task.id, command, task.name, pattern
+                            task.id, command, task.id, pattern
                         )
                     });
                     return Ok(Some(decision.to_string()));
@@ -238,7 +238,6 @@ mod tests {
 
         let task = Task {
             id: "impl".to_string(),
-            name: "Implement".to_string(),
             deny: Some(DenyRules {
                 files: vec!["docs/specs/**".to_string()],
                 commands: vec![],
@@ -249,10 +248,9 @@ mod tests {
         let mut state = active_state("test", "impl", &wf);
         state.workflow = "test".to_string();
 
-        // Write minimal config so load_config succeeds.
         write_config(
             dir.path(),
-            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          files:\n            - \"docs/specs/**\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        prompt: \"do it\"\n        deny:\n          files:\n            - \"docs/specs/**\"\n",
         );
         save_state(dir.path(), &state).unwrap();
 
@@ -273,7 +271,7 @@ mod tests {
 
         write_config(
             dir.path(),
-            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        outputs:\n          - \"src/**\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        prompt: \"do it\"\n        outputs:\n          - \"src/**\"\n",
         );
 
         let wf_for_state = Workflow {
@@ -281,7 +279,6 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "impl".to_string(),
-                name: "Implement".to_string(),
                 outputs: vec!["src/**".to_string()],
                 ..Task::default()
             }],
@@ -306,7 +303,7 @@ mod tests {
 
         write_config(
             dir.path(),
-            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        outputs:\n          - \"src/**\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        prompt: \"do it\"\n        outputs:\n          - \"src/**\"\n",
         );
 
         let wf_for_state = Workflow {
@@ -314,7 +311,6 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "impl".to_string(),
-                name: "Implement".to_string(),
                 outputs: vec!["src/**".to_string()],
                 ..Task::default()
             }],
@@ -340,7 +336,7 @@ mod tests {
 
         write_config(
             dir.path(),
-            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          commands:\n            - \"git push\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        prompt: \"do it\"\n        deny:\n          commands:\n            - \"git push\"\n",
         );
 
         let wf_for_state = Workflow {
@@ -348,7 +344,6 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "impl".to_string(),
-                name: "Implement".to_string(),
                 deny: Some(DenyRules {
                     files: vec![],
                     commands: vec!["git push".to_string()],
@@ -375,7 +370,7 @@ mod tests {
 
         write_config(
             dir.path(),
-            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        name: Implement\n        deny:\n          commands:\n            - \"git push\"\n",
+            "vars:\n  test: make test\nworkflows:\n  test:\n    name: test\n    tasks:\n      - id: impl\n        prompt: \"do it\"\n        deny:\n          commands:\n            - \"git push\"\n",
         );
 
         let wf_for_state = Workflow {
@@ -383,7 +378,6 @@ mod tests {
             description: None,
             tasks: vec![Task {
                 id: "impl".to_string(),
-                name: "Implement".to_string(),
                 deny: Some(DenyRules {
                     files: vec![],
                     commands: vec!["git push".to_string()],
