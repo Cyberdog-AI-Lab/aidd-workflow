@@ -112,7 +112,7 @@ pub fn resolve_template(s: &str, config: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{Action, SubagentTask, Config, Task, Workflow};
+    use crate::config::types::{Action, SubAgentTask, Config, Task, Workflow};
     use crate::engine::state::{StepStatus, WorkflowState};
     use std::collections::HashMap;
 
@@ -210,7 +210,7 @@ mod tests {
                 description: None,
                 actions: vec![],
                 agents: Some(vec![
-                    SubagentTask {
+                    SubAgentTask {
                         id: "x".to_string(),
                         name: None,
                         description: None,
@@ -220,7 +220,7 @@ mod tests {
                         }],
                         requires: vec![],
                     },
-                    SubagentTask {
+                    SubAgentTask {
                         id: "y".to_string(),
                         name: None,
                         description: None,

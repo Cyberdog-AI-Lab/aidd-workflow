@@ -42,7 +42,7 @@ pub struct Task {
     #[serde(default)]
     pub actions: Vec<Action>,
     /// Sub-agents to run concurrently. Mutually exclusive with `actions` (checked at runtime).
-    pub agents: Option<Vec<SubagentTask>>,
+    pub agents: Option<Vec<SubAgentTask>>,
     /// IDs of tasks that must complete before this task starts (checked at runtime).
     #[serde(default)]
     pub requires: Vec<String>,
@@ -67,7 +67,7 @@ pub struct DenyRules {
 
 #[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SubagentTask {
+pub struct SubAgentTask {
     /// Unique sub-agent identifier within the agents block. Pattern: `^[a-z][a-z0-9_-]*$`
     #[schemars(schema_with = "kebab_id")]
     pub id: String,
@@ -151,7 +151,7 @@ name: Task 1"#;
     #[test]
     fn agent_task_requires_defaults_to_empty() {
         let yaml = r#"id: sub1"#;
-        let sub: SubagentTask = serde_yaml::from_str(yaml).unwrap();
+        let sub: SubAgentTask = serde_yaml::from_str(yaml).unwrap();
         assert!(sub.requires.is_empty());
     }
 
@@ -159,7 +159,7 @@ name: Task 1"#;
     fn agent_task_requires_parses_list() {
         let yaml = r#"id: sub2
 requires: [sub1]"#;
-        let sub: SubagentTask = serde_yaml::from_str(yaml).unwrap();
+        let sub: SubAgentTask = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(sub.requires, vec!["sub1"]);
     }
 

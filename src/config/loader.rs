@@ -170,14 +170,14 @@ mod tests {
 
     #[test]
     fn validate_rejects_both_actions_and_agents() {
-        use crate::config::types::{Action, SubagentTask};
+        use crate::config::types::{Action, SubAgentTask};
         let mut config = minimal_config();
         let wf = config.workflows.get_mut("wf").unwrap();
         wf.tasks[0].actions = vec![Action::Agent {
             prompt: "do it".to_string(),
             background: false,
         }];
-        wf.tasks[0].agents = Some(vec![SubagentTask {
+        wf.tasks[0].agents = Some(vec![SubAgentTask {
             id: "sub1".to_string(),
             name: None,
             description: None,
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn validate_collects_multiple_errors() {
-        use crate::config::types::{Action, SubagentTask};
+        use crate::config::types::{Action, SubAgentTask};
         let mut config = minimal_config();
         let wf = config.workflows.get_mut("wf").unwrap();
         wf.tasks[0].requires.push("missing".to_string());
@@ -197,7 +197,7 @@ mod tests {
             prompt: "do it".to_string(),
             background: false,
         }];
-        wf.tasks[0].agents = Some(vec![SubagentTask {
+        wf.tasks[0].agents = Some(vec![SubAgentTask {
             id: "sub1".to_string(),
             name: None,
             description: None,

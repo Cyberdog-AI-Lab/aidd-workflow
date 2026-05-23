@@ -92,7 +92,7 @@
 				}
 			]
 		},
-		"SubagentTask": {
+		"SubAgentTask": {
 			"type": "object",
 			"required": ["id"],
 			"properties": {
@@ -164,7 +164,7 @@
 					"description": "Sub-agents to run concurrently. Mutually exclusive with `actions` (checked at runtime).",
 					"type": ["array", "null"],
 					"items": {
-						"$ref": "#/definitions/SubagentTask"
+						"$ref": "#/definitions/SubAgentTask"
 					}
 				},
 				"allow_files": {

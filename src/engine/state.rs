@@ -105,7 +105,7 @@ impl WorkflowState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{SubagentTask, Task, Workflow};
+    use crate::config::types::{SubAgentTask, Task, Workflow};
 
     fn make_workflow_with_agents() -> Workflow {
         Workflow {
@@ -115,14 +115,14 @@ mod tests {
                 id: "parent".to_string(),
                 name: "Parent".to_string(),
                 agents: Some(vec![
-                    SubagentTask {
+                    SubAgentTask {
                         id: "a".to_string(),
                         name: None,
                         description: None,
                         actions: vec![],
                         requires: vec![],
                     },
-                    SubagentTask {
+                    SubAgentTask {
                         id: "b".to_string(),
                         name: None,
                         description: None,
