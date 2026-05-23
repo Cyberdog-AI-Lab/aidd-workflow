@@ -66,10 +66,9 @@ fn build_settings(cwd: &Path) -> Value {
                 {"matcher": "Write", "hooks": post_edit_hooks}
             ],
             "PreToolUse": [
-                {"matcher": "TaskUpdate", "hooks": [{"type": "command", "command": "workflow-runner hook pre-taskupdate"}]},
-                {"matcher": "Edit",       "hooks": [{"type": "command", "command": "workflow-runner hook pre-edit"}]},
-                {"matcher": "Write",      "hooks": [{"type": "command", "command": "workflow-runner hook pre-edit"}]},
-                {"matcher": "Bash",       "hooks": [{"type": "command", "command": "workflow-runner hook pre-bash"}]}
+                {"matcher": "Edit",  "hooks": [{"type": "command", "command": "workflow-runner hook pre-edit"}]},
+                {"matcher": "Write", "hooks": [{"type": "command", "command": "workflow-runner hook pre-edit"}]},
+                {"matcher": "Bash",  "hooks": [{"type": "command", "command": "workflow-runner hook pre-bash"}]}
             ]
         }
     })
@@ -189,10 +188,10 @@ mod tests {
         let content = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
 
-        // PreToolUse should have TaskUpdate, Edit, Write, Bash matchers.
+        // PreToolUse should have Edit, Write, Bash matchers.
         let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
         let matchers: Vec<&str> = pre.iter().filter_map(|e| e["matcher"].as_str()).collect();
-        assert!(matchers.contains(&"TaskUpdate"));
+        assert!(!matchers.contains(&"TaskUpdate"));
         assert!(matchers.contains(&"Edit"));
         assert!(matchers.contains(&"Write"));
         assert!(matchers.contains(&"Bash"));
@@ -235,15 +234,6 @@ mod tests {
                         "matcher": "Bash",
                         "hooks": [{"type": "command", "command": "my-custom-hook.sh"}]
                     }
-                ],
-                "PreToolUse": [
-                    {
-                        "matcher": "TaskUpdate",
-                        "hooks": [
-                            {"type": "command", "command": "workflow-runner hook pre-taskupdate"},
-                            {"type": "command", "command": "my-taskupdate-hook.sh"}
-                        ]
-                    }
                 ]
             }
         });
@@ -265,19 +255,11 @@ mod tests {
             .iter()
             .any(|h| h["command"].as_str() == Some("my-custom-hook.sh")));
 
-        // Custom TaskUpdate hook should be preserved alongside the wf-runner hook.
+        // TaskUpdate matcher should not appear in PreToolUse.
         let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
-        let tu_entry = pre
+        assert!(pre
             .iter()
-            .find(|e| e["matcher"].as_str() == Some("TaskUpdate"))
-            .unwrap();
-        let tu_hooks = tu_entry["hooks"].as_array().unwrap();
-        assert!(tu_hooks
-            .iter()
-            .any(|h| h["command"].as_str() == Some("my-taskupdate-hook.sh")));
-        assert!(tu_hooks
-            .iter()
-            .any(|h| h["command"].as_str() == Some("workflow-runner hook pre-taskupdate")));
+            .all(|e| e["matcher"].as_str() != Some("TaskUpdate")));
     }
 
     #[test]
@@ -285,12 +267,12 @@ mod tests {
         let dir = setup_dir_with_rust_checks(false);
         let path = dir.path().join(".claude/settings.json");
 
-        // Simulate outdated wf-runner hooks (e.g. shell script style).
+        // Simulate outdated wf-runner hooks for Edit matcher.
         let existing = serde_json::json!({
             "hooks": {
                 "PreToolUse": [
                     {
-                        "matcher": "TaskUpdate",
+                        "matcher": "Edit",
                         "hooks": [{"type": "command", "command": "workflow-runner hook old-event"}]
                     }
                 ]
@@ -304,18 +286,18 @@ mod tests {
         let v: Value = serde_json::from_str(&content).unwrap();
 
         let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
-        let tu = pre
+        let edit = pre
             .iter()
-            .find(|e| e["matcher"].as_str() == Some("TaskUpdate"))
+            .find(|e| e["matcher"].as_str() == Some("Edit"))
             .unwrap();
-        let commands: Vec<&str> = tu["hooks"]
+        let commands: Vec<&str> = edit["hooks"]
             .as_array()
             .unwrap()
             .iter()
             .filter_map(|h| h["command"].as_str())
             .collect();
 
-        assert!(commands.contains(&"workflow-runner hook pre-taskupdate"));
+        assert!(commands.contains(&"workflow-runner hook pre-edit"));
         assert!(!commands.contains(&"workflow-runner hook old-event"));
     }
 }

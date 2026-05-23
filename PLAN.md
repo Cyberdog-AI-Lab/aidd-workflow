@@ -126,12 +126,6 @@ pub struct PostBashEvent {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PreTaskUpdateEvent {
-    pub cwd: Option<String>,
-    pub tool_input: TaskUpdateInput,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct PostEditEvent {
     pub cwd: Option<String>,
     pub tool_input: EditInput,  // file_path フィールドを持つ
@@ -289,10 +283,6 @@ workflow-runner init
     ],
     "PreToolUse": [
       {
-        "matcher": "TaskUpdate",
-        "hooks": [{"type": "command", "command": "workflow-runner hook pre-taskupdate"}]
-      },
-      {
         "matcher": "Edit",
         "hooks": [{"type": "command", "command": "workflow-runner hook pre-edit"}]
       },
@@ -335,7 +325,6 @@ hook コマンドは `--cwd` なしで `"command": "workflow-runner hook pre-edi
 |--------|---------|--------|
 | `pre-edit` | InProgress ステップの `allow_files` / `deny.files` をチェック | `{"decision":"block","reason":"..."}` または `{"decision":"ask","reason":"..."}` |
 | `pre-bash` | InProgress ステップの `deny.commands` をチェック | `{"decision":"block","reason":"..."}` |
-| `pre-taskupdate` | InProgress ステップの gate 未実行チェック（既存） | `{"decision":"block","reason":"..."}` |
 | `post-edit` | `config.yml` 編集後のスキーマ検証（既存） | 警告文字列または空 |
 
 ### 完了基準
@@ -452,7 +441,8 @@ Phase 5（自律駆動型ワークフロー）    🔲 未着手
 | `Step.checklist_key` | `id` で代替可能 | `Step.id` |
 | `Action::Run { gate }` | `actions` に統合 | `Step.actions` |
 | `.claude/hooks/post-bash-capture-test.sh` | 直接コマンドに移行 | `workflow-runner hook post-bash`（廃止） |
-| `.claude/hooks/pre-taskupdate-gate.sh` | 直接コマンドに移行 | `workflow-runner hook pre-taskupdate` |
+| `.claude/hooks/pre-taskupdate-gate.sh` | 直接コマンドに移行→その後 pre-taskupdate フック自体も廃止 | （廃止） |
+| `workflow-runner hook pre-taskupdate` | TaskUpdate フックは効果がないため廃止 | （削除） |
 | `.claude/hooks/post-edit-validate-config.sh` | 直接コマンドに移行 | `workflow-runner hook post-edit` |
 | `call_anthropic_api()` | Standalone 削除に伴い廃止 | Phase 5 で再設計 |
 | `src/adapters/standalone/` | Phase 4 で削除 | `src/infra/shell.rs`（`run_command` のみ移植） |

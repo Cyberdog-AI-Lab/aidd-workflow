@@ -14,11 +14,6 @@ pub struct BashResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct TaskUpdateInput {
-    pub status: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct EditInput {
     pub file_path: String,
 }
@@ -29,12 +24,6 @@ pub struct PostBashEvent {
     pub tool_input: BashInput,
     #[serde(default)]
     pub tool_response: BashResponse,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PreTaskUpdateEvent {
-    pub cwd: Option<String>,
-    pub tool_input: TaskUpdateInput,
 }
 
 #[derive(Debug, Deserialize)]

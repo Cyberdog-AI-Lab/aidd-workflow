@@ -268,7 +268,8 @@ SKILL.md（Claude Code）                workflow-runner
 ```bash
 # settings.json に登録するコマンド（シェルスクリプト不要）
 "command": "workflow-runner hook pre-edit"
-"command": "workflow-runner hook pre-taskupdate"
+"command": "workflow-runner hook pre-bash"
+"command": "workflow-runner hook post-edit"
 ```
 
 ---
@@ -388,7 +389,6 @@ design ──▶ implement ──▶ quality-check ──▶ complete
 |--------|-----------|---------|
 | `pre-edit` | Edit/Write 実行前 | allow_files / deny.files チェック → block / ask |
 | `pre-bash` | Bash 実行前 | deny.commands チェック → block |
-| `pre-taskupdate` | TaskUpdate 実行前 | no-op |
 | `post-edit` | Edit/Write 実行後 | config.yml 変更検出 → スキーマ検証警告 |
 
 フックはエラーで終了しない（exit 0 固定）。ワークフロー外の操作を干渉しない設計。
@@ -525,9 +525,6 @@ cmd_hook(cwd, event_type)
   ├─ "post-bash"
   │    └─ handle_post_bash()   → no-op（常に Ok(())）
   │
-  ├─ "pre-taskupdate"
-  │    └─ no-op（常に None を返す）
-  │
   ├─ "post-edit"
   │    ├─ serde_json::from_str::<PostEditEvent>()
   │    ├─ file_path が ".workflow/config.yml" で終わらなければ → None
@@ -557,7 +554,7 @@ init:
   └─ infra::settings_writer::write_settings_json(cwd)
        ├─ build_settings(cwd)
        │    ├─ post-edit-rust-checks.sh が存在すれば PostToolUse フックに追加
-       │    └─ PreToolUse: TaskUpdate / Edit / Write / Bash
+       │    └─ PreToolUse: Edit / Write / Bash
        │       PostToolUse: Edit / Write
        └─ .claude/settings.json を新規書き込み
 

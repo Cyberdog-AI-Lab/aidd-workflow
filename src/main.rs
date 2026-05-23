@@ -70,7 +70,7 @@ enum Commands {
     List,
     /// Process a Claude Code hook event (stdin: hook JSON).
     Hook {
-        /// Event type: post-bash | pre-taskupdate | post-edit
+        /// Event type: post-bash | post-edit | pre-edit | pre-bash
         event_type: String,
     },
     /// Initialize .workflow/ directory and generate .claude/settings.json.
@@ -359,9 +359,6 @@ fn cmd_hook(cwd: &Path, event_type: &str) -> Result<String> {
         "post-bash" => {
             let _ = hook_handler::handle_post_bash(&effective_cwd, &input);
             None
-        }
-        "pre-taskupdate" => {
-            hook_handler::handle_pre_taskupdate(&effective_cwd, &input).unwrap_or(None)
         }
         "post-edit" => hook_handler::handle_post_edit(&effective_cwd, &input).unwrap_or(None),
         "pre-edit" => hook_handler::handle_pre_edit(&effective_cwd, &input).unwrap_or(None),

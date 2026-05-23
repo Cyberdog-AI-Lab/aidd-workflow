@@ -10,11 +10,6 @@ pub fn handle_post_bash(_cwd: &Path, _hook_json: &str) -> Result<()> {
     Ok(())
 }
 
-/// Claude Code PreToolUse(TaskUpdate) hook. No-op.
-pub fn handle_pre_taskupdate(_cwd: &Path, _hook_json: &str) -> Result<Option<String>> {
-    Ok(None)
-}
-
 /// Claude Code PostToolUse(Edit/Write) hook.
 /// Outputs a schema warning when config.yml fails validation after an edit.
 pub fn handle_post_edit(cwd: &Path, hook_json: &str) -> Result<Option<String>> {

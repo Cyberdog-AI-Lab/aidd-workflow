@@ -32,15 +32,6 @@
       {
         "hooks": [
           {
-            "command": "workflow-runner hook pre-taskupdate",
-            "type": "command"
-          }
-        ],
-        "matcher": "TaskUpdate"
-      },
-      {
-        "hooks": [
-          {
             "command": "workflow-runner hook pre-edit",
             "type": "command"
           }
