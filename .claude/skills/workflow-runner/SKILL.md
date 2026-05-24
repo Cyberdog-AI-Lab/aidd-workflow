@@ -1,9 +1,9 @@
 ---
 name: workflow-runner
 description: >
-  プロジェクトの .workflow/config.yml に定義されたワークフローを Tasks API で管理・実行するスキル。
+  プロジェクトの .workflow/config.yml に定義されたワークフローを管理・実行するスキル。
   テストスキップ・ルール忘れ・多段タスクの中断など「Claude が守るべき手順を守らない」問題を
-  workflow-runner（Rust バイナリ）+ Hooks + Tasks API の組み合わせで構造的に防ぐ。
+  workflow-runner（Rust バイナリ）+ Hooks の組み合わせで構造的に防ぐ。
   「バグ修正フローで進めて」「workflow bug-fix」「ワークフローを開始して」「機能開発フローで」
   「テストを飛ばさずに進めて」「複数ステップの作業をタスク管理しながら進めたい」
   「前回中断した作業を再開して」など、ワークフローに沿って作業を構造的に進めたいときは
@@ -39,7 +39,7 @@ description: >
 workflow-runner next 2>/dev/null || workflow-runner list
 ```
 
-- `next` が中断中のワークフローを検出した場合 → そのまま再開フローへ（`next` の出力は `WorkflowOutput` 形式。`tasks` 配列を TaskCreate して dispatch する）
+- `next` が中断中のワークフローを検出した場合 → そのまま再開フローへ（`next.tasks` を dispatch する）
 - `next` が失敗した場合（進行中ワークフローなし）→ `list` の結果をユーザーに提示してワークフロー選択
 
 > **注意**：承認待ち（`awaiting_approval`）状態のときに `next` を呼ぶと、**自動的に承認されて次のタスクへ進む**。承認が必要かどうかをユーザーに確認してから呼ぶこと（承認フローの詳細は後述）。
@@ -86,27 +86,11 @@ workflow-runner start <workflow-name>
 
 `workflow_id` と `tasks` 配列を保持して以降の処理に使う。
 
-### 3. TaskCreate で各タスクを登録する
-
-`start` が返した `tasks` 配列の各タスクに対して **TaskCreate** を呼ぶ：
-
-- `subject`：`task` フィールドの値（`null` の場合は `task_id` を使う）
-- `description`：`prompt` があれば prompt の内容、なければ `subject` と同じ値
-- `metadata`：`{ "workflow_id": "<workflow_id>", "task_id": "<task_id>" }`
-
-返された TaskCreate の ID（Tasks API の ID）を記録し、実行・完了時に TaskUpdate でステータスを更新する。
-
 ---
 
 ## タスクの dispatch
 
 `tasks` 配列の各タスクを `task` / `prompt` / `skills` / `agents` に従って実行する。
-
-実行開始前に TaskUpdate でステータスを更新する：
-
-```
-TaskUpdate(id=<TaskCreate で得た ID>, status="in_progress")
-```
 
 | 条件 | 実行方法 |
 |------|---------|
@@ -172,15 +156,6 @@ echo '{
 workflow-runner complete <task-id>
 ```
 
-完了後、対応する TaskUpdate でステータスを `completed` に更新する：
-
-```
-TaskUpdate(id=<TaskCreate で得た ID>, status="completed")
-```
-
-`complete` が `allowed: true` を返し `next.tasks` に新しいタスクが含まれる場合は、
-**それぞれに対して TaskCreate を呼んで登録してから** dispatch する。
-
 ### complete レスポンスの解釈
 
 `complete` の出力：
@@ -196,7 +171,7 @@ TaskUpdate(id=<TaskCreate で得た ID>, status="completed")
 | `allowed` | `next` | `next.status` | 対応 |
 |-----------|--------|---------------|------|
 | `false` | `null` | — | `reason` をユーザーに伝えてブロック。gate 未実行なら該当作業を実行してから `complete` を再実行 |
-| `true` | あり | `in_progress` | `next.tasks` を TaskCreate して dispatch する |
+| `true` | あり | `in_progress` | `next.tasks` を dispatch する |
 | `true` | あり | `completed` | ワークフロー完了。完了サマリーを表示する |
 | `true` | あり | `blocked` | 未解決の依存タスクがある（後述） |
 | `true` | あり | `awaiting_approval` | 承認待ち（後述） |
@@ -248,7 +223,7 @@ workflow-runner next
 ```
 
 `next` を呼ぶと承認が通り、次のタスクが `WorkflowOutput` 形式で返る。
-`next.tasks` を TaskCreate で登録してから dispatch する。
+`next.tasks` を dispatch する。
 
 ### 却下された場合
 
