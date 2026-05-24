@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# コミットメッセージのプレフィックス形式を強制する
+
+COMMIT_MSG_FILE=$1
+COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
+
+# マージコミット・リバートコミットは除外
+if echo "$COMMIT_MSG" | grep -qE "^(Merge|Revert) "; then
+  exit 0
+fi
+
+VALID_PATTERN="^(feat|fix|refactor|test|docs|style|chore|perf|ci): .+"
+
+if ! echo "$COMMIT_MSG" | grep -qE "$VALID_PATTERN"; then
+  echo "エラー: コミットメッセージの形式が正しくありません。" >&2
+  echo "正しい形式: <prefix>: <概要>" >&2
+  echo "有効なprefix: feat, fix, refactor, test, docs, style, chore, perf, ci" >&2
+  echo "例: feat: ユーザー認証機能を追加" >&2
+  exit 1
+fi

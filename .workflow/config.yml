@@ -1,0 +1,114 @@
+# yaml-language-server: $schema=./workflow.schema.json
+# workflow-runner 設定ファイル
+# このファイルをプロジェクトルートの .workflow/config.yml に置く
+
+# 他ファイルへの分割（imports: で複数ファイルに切り出せる）
+# imports:
+#   - vars/default.yml
+#   - workflows/extra.yml
+
+# プロジェクト固有の変数定義（Makefile の target 名などを登録する）
+vars:
+  test: make test
+  lint: make lint
+  build: make build
+
+# ワークフローテンプレート
+workflows:
+  bug-fix:
+    name: バグ修正フロー
+    description: バグを再現・特定し、修正・テストまで完走するフロー
+    tasks:
+      - id: reproduce
+        task: バグを再現する
+        prompt: |
+          バグを手元で再現し、再現手順（環境・操作・期待値・実際の挙動）を記録してください。
+
+      - id: identify
+        task: 原因を特定する
+        prompt: |
+          再現結果をもとに、原因となるファイル・関数・行を特定して記録してください。
+
+      - id: implement
+        task: バグを修正する
+        prompt: |
+          原因特定の結果に基づき、最小限の変更でバグを修正してください。
+          修正後は {{vars.test}} を実行してテストがすべてパスすることを確認してください。
+        outputs:
+          - "src/**"
+          - "tests/**"
+        requires: [reproduce, identify]
+
+      - id: complete
+        task: 完了確認
+        prompt: |
+          すべてのタスクが完了したことを確認し、作業サマリーを報告してください。
+        requires: [implement]
+
+  feature:
+    name: 機能開発フロー
+    description: 新機能を設計・実装・テストするフロー
+    tasks:
+      - id: design
+        task: 設計する
+        prompt: |
+          実装方針・影響範囲・インターフェースを整理して設計ドキュメントを作成してください。
+        outputs:
+          - "docs/**"
+          - "/.*\\.md$/"
+        approval: true   # wait for developer approval before implementation
+
+      - id: implement
+        task: 実装する
+        prompt: |
+          設計書に従って実装してください。
+          実装後は {{vars.test}} と {{vars.lint}} を実行して品質を確認してください。
+        outputs:
+          - "src/**"
+          - "tests/**"
+        deny:
+          files:
+            - "docs/specs/**"
+        requires: [design]
+
+      - id: complete
+        task: 完了確認
+        prompt: |
+          実装・テストが完了したことを確認してサマリーを報告してください。
+        requires: [implement]
+
+  release:
+    name: リリースフロー
+    description: 設計・実装・品質チェック（並列）まで完走するフロー
+    tasks:
+      - id: design
+        task: 設計する
+        prompt: |
+          実装方針・影響範囲・インターフェースを整理して設計ドキュメントを作成してください。
+        outputs:
+          - "docs/**"
+        approval: true
+
+      - id: implement
+        task: 実装する
+        prompt: |
+          設計書に従って実装してください。
+          実装後は {{vars.build}} でビルドを確認してください。
+        outputs:
+          - "src/**"
+          - "tests/**"
+        requires: [design]
+
+      - id: quality-check
+        task: 品質チェック
+        requires: [implement]
+        agents:
+          - run-test    # → .claude/agents/run-test.md を参照
+          - run-lint    # → .claude/agents/run-lint.md を参照
+
+      - id: complete
+        task: 完了確認
+        prompt: |
+          設計・実装・品質チェックが完了したことを確認してリリースサマリーを報告してください。
+        requires: [quality-check]
+        approval: true

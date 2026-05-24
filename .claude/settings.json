@@ -1,0 +1,61 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "command -v workflow-runner >/dev/null 2>&1 && workflow-runner hook post-edit || exit 0",
+            "type": "command"
+          },
+          {
+            "command": ".claude/hooks/post-edit-rust-checks.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit"
+      },
+      {
+        "hooks": [
+          {
+            "command": "command -v workflow-runner >/dev/null 2>&1 && workflow-runner hook post-edit || exit 0",
+            "type": "command"
+          },
+          {
+            "command": ".claude/hooks/post-edit-rust-checks.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Write"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "command -v workflow-runner >/dev/null 2>&1 && workflow-runner hook pre-edit || exit 0",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit"
+      },
+      {
+        "hooks": [
+          {
+            "command": "command -v workflow-runner >/dev/null 2>&1 && workflow-runner hook pre-edit || exit 0",
+            "type": "command"
+          }
+        ],
+        "matcher": "Write"
+      },
+      {
+        "hooks": [
+          {
+            "command": "command -v workflow-runner >/dev/null 2>&1 && workflow-runner hook pre-bash || exit 0",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ]
+  }
+}
