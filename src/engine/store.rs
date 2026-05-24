@@ -39,10 +39,20 @@ CREATE TABLE IF NOT EXISTS action_reports (
 );
 ";
 
+/// Canonicalizes a path to an absolute, normalized form.
+/// This prevents issues with symlinks, trailing slashes, and different path representations.
+fn normalize_cwd(cwd: &Path) -> Result<String> {
+    let canonical = cwd
+        .canonicalize()
+        .context("failed to canonicalize cwd path")?;
+    Ok(canonical.to_string_lossy().to_string())
+}
+
 fn open_db(cwd: &Path) -> Result<Connection> {
     let dir = cwd.join(".workflow");
     std::fs::create_dir_all(&dir)?;
     let conn = Connection::open(dir.join("workflow.db")).context("failed to open workflow.db")?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
 }
@@ -157,7 +167,7 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
 /// Returns an error if multiple qualifying workflows exist (use --workflow-id to disambiguate).
 pub fn load_state(cwd: &Path) -> Result<Option<WorkflowState>> {
     let conn = open_db(cwd)?;
-    let cwd_str = cwd.to_string_lossy();
+    let cwd_str = normalize_cwd(cwd)?;
 
     let mut stmt = conn.prepare(
         "SELECT workflow_id FROM workflow_runs
@@ -203,14 +213,15 @@ pub fn load_state_by_id(cwd: &Path, workflow_id: &str) -> Result<Option<Workflow
 /// All writes are atomic: a crash mid-save leaves the previous state intact.
 pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
     let mut conn = open_db(cwd)?;
-    let cwd_str = cwd.to_string_lossy();
+    let cwd_str = normalize_cwd(cwd)?;
 
     let tx = conn.transaction()?;
 
     tx.execute(
-        "INSERT OR REPLACE INTO workflow_runs (workflow_id, cwd, workflow, status, started_at)
+        "INSERT INTO workflow_runs (workflow_id, cwd, workflow, status, started_at)
          VALUES (?1, ?2, ?3, 'active', ?4)
          ON CONFLICT(workflow_id) DO UPDATE SET
+             cwd = excluded.cwd,
              workflow = excluded.workflow,
              started_at = excluded.started_at",
         params![
@@ -302,7 +313,7 @@ pub fn clear_state_by_id(cwd: &Path, workflow_id: &str) -> Result<()> {
 #[allow(dead_code)]
 pub fn clear_state(cwd: &Path) -> Result<()> {
     let conn = open_db(cwd)?;
-    let cwd_str = cwd.to_string_lossy();
+    let cwd_str = normalize_cwd(cwd)?;
     conn.execute(
         "UPDATE workflow_runs SET status = 'completed', completed_at = ?1
          WHERE cwd = ?2 AND status = 'active'",

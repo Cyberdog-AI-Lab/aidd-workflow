@@ -53,7 +53,7 @@
       "additionalProperties": false
     },
     "Task": {
-      "description": "One task in a workflow.\n\nTask modes (mutually exclusive; checked at runtime): - `prompt` and/or `skills`: automated task executed by an agent. - `agents`: parallel custom-agent task; each element is a name under `.claude/agents/`. - Neither: manual task — Claude works from `description` (required when manual).",
+      "description": "One task in a workflow.\n\nTask modes (mutually exclusive; checked at runtime): - `prompt` and/or `skills`: automated task executed by an agent. - `agents`: parallel custom-agent task; each element is a name under `.claude/agents/`.",
       "type": "object",
       "required": [
         "id"

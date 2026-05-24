@@ -167,25 +167,25 @@ workflow-runner（CLI / MCP）
 
 ### フェーズ分割
 
-####  `claude -p` ベースのプロトタイプ
+#### `claude -p` ベースのプロトタイプ
 
 - 外部コントローラーを Rust バイナリ（または shell スクリプト）として実装
 - `claude -p "<prompt>"` でタスクを実行し、完了後に `workflow-runner complete` を呼ぶ
 - ログ・可観測性（JSON ログ出力、実行トレース）の基盤を作る
 - `--dry-run` フラグで実際の AI 呼び出しをスキップして制御フローを検証できるようにする
 
-####  Claude Code Channels 統合
+#### Claude Code Channels 統合
 
 - Channels の仕様が安定したタイミングで Channels ベースに移行
 - セッションの起動・停止・出力の受け取りを Channels API 経由で制御
 - 並列ステップの並列セッション起動を実現
 
-####  通知・承認統合
+#### 通知・承認統合
 
 - `awaiting_approval` 時に外部サービスへ通知（Slack Webhook / GitHub PR コメント）
 - 外部から `workflow-runner next`（承認）または `workflow-runner reject`（却下）を呼ぶ webhook エンドポイント
 
-### 完了基準（
+### 完了基準
 
 - Claude Code セッション外からワークフローをエンドツーエンドで実行できる
 - `cargo test` が全て通過する

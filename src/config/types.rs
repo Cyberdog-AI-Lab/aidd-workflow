@@ -32,7 +32,6 @@ pub struct Workflow {
 /// Task modes (mutually exclusive; checked at runtime):
 /// - `prompt` and/or `skills`: automated task executed by an agent.
 /// - `agents`: parallel custom-agent task; each element is a name under `.claude/agents/`.
-/// - Neither: manual task — Claude works from `description` (required when manual).
 #[derive(Debug, Deserialize, Serialize, Clone, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Task {

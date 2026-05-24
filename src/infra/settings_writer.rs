@@ -29,7 +29,7 @@ pub fn merge_settings_json(cwd: &Path) -> Result<()> {
     let existing: Value = if path.exists() {
         let content =
             std::fs::read_to_string(&path).context("failed to read .claude/settings.json")?;
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+        serde_json::from_str(&content).context("failed to parse .claude/settings.json as JSON")?
     } else {
         serde_json::json!({})
     };
