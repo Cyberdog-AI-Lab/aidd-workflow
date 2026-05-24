@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "workflow-runner hook post-edit",
+            "command": "command -v workflow-runner >/dev/null 2>&1 && workflow-runner hook post-edit || exit 0",
             "type": "command"
           },
           {
@@ -17,7 +17,7 @@
       {
         "hooks": [
           {
-            "command": "workflow-runner hook post-edit",
+            "command": "command -v workflow-runner >/dev/null 2>&1 && workflow-runner hook post-edit || exit 0",
             "type": "command"
           },
           {
@@ -32,7 +32,7 @@
       {
         "hooks": [
           {
-            "command": "workflow-runner hook pre-edit",
+            "command": "command -v workflow-runner >/dev/null 2>&1 && workflow-runner hook pre-edit || exit 0",
             "type": "command"
           }
         ],
@@ -41,7 +41,7 @@
       {
         "hooks": [
           {
-            "command": "workflow-runner hook pre-edit",
+            "command": "command -v workflow-runner >/dev/null 2>&1 && workflow-runner hook pre-edit || exit 0",
             "type": "command"
           }
         ],
@@ -50,7 +50,7 @@
       {
         "hooks": [
           {
-            "command": "workflow-runner hook pre-bash",
+            "command": "command -v workflow-runner >/dev/null 2>&1 && workflow-runner hook pre-bash || exit 0",
             "type": "command"
           }
         ],

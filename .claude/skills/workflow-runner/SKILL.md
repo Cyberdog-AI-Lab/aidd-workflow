@@ -116,6 +116,32 @@ TaskUpdate(id=<TaskCreate で得た ID>, status="in_progress")
 | `agents` あり | 各エージェントを Agent ツールで並列起動する（後述） |
 | すべて空 | `task` に従って Claude が直接作業する（手動タスク） |
 
+### Agent ツールでの dispatch（必須設定）
+
+作業エージェントを spawn する場合は **必ず** `isolation: "worktree"` を指定する：
+
+```
+Agent(
+  isolation: "worktree",   # ← 必須（sub-agent がワークフロー状態を操作できなくなる）
+  subagent_type: "<agent-name>",
+  prompt: "...\n\n⛔ 禁止: workflow-runner / report / complete / next / reject コマンドを呼ばないこと。"
+)
+```
+
+**`isolation: "worktree"` が提供する構造的保護：**
+
+- `./target/debug/workflow-runner` が不在（`target/` は .gitignore 対象）
+- `.workflow/workflow.db` が不在（状態 DB にアクセス不可）
+- `cargo build` でバイナリを再ビルドしても、DB がないため状態変更不可
+
+**prompt に必ず含める禁止指示（末尾に付加）：**
+
+```
+⛔ 禁止：workflow-runner / report / complete / next / reject コマンドを一切呼ばないこと。
+   ワークフロー状態はオーケストレーターが管理する。
+   実装・テスト・lint の結果のみを報告して終了すること。
+```
+
 ---
 
 ## タスク完了後の処理
