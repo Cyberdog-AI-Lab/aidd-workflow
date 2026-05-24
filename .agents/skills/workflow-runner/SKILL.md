@@ -20,7 +20,7 @@ description: >
 ## 前提確認
 
 1. `.workflow/config.yml` が存在するか確認する
-   - **存在しない場合**：「`.workflow/config.yml` が見つかりません。`/workflow-create` でワークフローを新規作成してください」と案内して終了
+   - **存在しない場合**：「`.workflow/config.yml` が見つかりません。`/workflow-creator` でワークフローを新規作成してください」と案内して終了
 
 2. `workflow-runner` バイナリを以下の優先順で探す：
    1. `which workflow-runner` で PATH にあれば `workflow-runner` をそのまま使う

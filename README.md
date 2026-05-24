@@ -93,7 +93,7 @@ vars:
 ## ワークフローの追加
 
 ```
-/workflow-create    # インタラクティブに新しいワークフローを追加
+/workflow-creator    # インタラクティブに新しいワークフローを追加
 ```
 
 または `.workflow/config.yml` を直接編集する。
@@ -213,7 +213,7 @@ src/                             # workflow-runner（Rust）
 │   └── post-edit-rust-checks.sh  .rs 編集後の自動品質チェック
 └── skills/
     ├── workflow-runner/SKILL.md
-    └── workflow-create/SKILL.md
+    └── workflow-creator/SKILL.md
 ```
 
 ## 依存

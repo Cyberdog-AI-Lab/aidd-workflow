@@ -1,5 +1,5 @@
 ---
-name: workflow-create
+name: workflow-creator
 description: >
   .workflow/config.yml に新しいワークフローテンプレートをインタラクティブに追加するスキル。
   「ワークフローを作りたい」「新しいフローを定義して」「hotfix フローを追加して」
@@ -9,7 +9,7 @@ description: >
   /workflow-runner から「config.yml が見つかりません」と案内された直後も使う。
 ---
 
-# Workflow Create スキル
+# Workflow Creator スキル
 
 `.workflow/config.yml` に新しいワークフローをインタラクティブに定義・追記する。
 
