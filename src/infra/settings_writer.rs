@@ -5,22 +5,6 @@ use std::path::Path;
 
 const WORKFLOW_RUNNER_CMD_PREFIX: &str = "workflow-runner hook";
 
-/// Writes `.claude/settings.json` from scratch with workflow-runner hook entries.
-/// Includes `.claude/hooks/post-edit-rust-checks.sh` if the file exists.
-pub fn write_settings_json(cwd: &Path) -> Result<()> {
-    let settings_dir = cwd.join(".claude");
-    std::fs::create_dir_all(&settings_dir).context("failed to create .claude directory")?;
-
-    let settings = build_settings(cwd);
-    let json = serde_json::to_string_pretty(&settings)?;
-
-    let path = settings_dir.join("settings.json");
-    std::fs::write(&path, json + "\n")
-        .with_context(|| format!("failed to write {}", path.display()))?;
-
-    Ok(())
-}
-
 /// Reads existing `.claude/settings.json` and merges workflow-runner hook entries,
 /// preserving all non-workflow-runner hooks.
 pub fn merge_settings_json(cwd: &Path) -> Result<()> {
@@ -34,7 +18,7 @@ pub fn merge_settings_json(cwd: &Path) -> Result<()> {
         serde_json::json!({})
     };
 
-    let target = build_settings(cwd);
+    let target = build_settings();
     let merged = merge_hook_settings(existing, target);
 
     let json = serde_json::to_string_pretty(&merged)?;
@@ -45,19 +29,9 @@ pub fn merge_settings_json(cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-fn build_settings(cwd: &Path) -> Value {
-    let rust_checks_path = cwd.join(".claude/hooks/post-edit-rust-checks.sh");
-    let include_rust_checks = rust_checks_path.exists();
-
-    let post_edit_hooks: Vec<Value> = {
-        let mut hooks = vec![
-            serde_json::json!({"type": "command", "command": "workflow-runner hook post-edit"}),
-        ];
-        if include_rust_checks {
-            hooks.push(serde_json::json!({"type": "command", "command": ".claude/hooks/post-edit-rust-checks.sh"}));
-        }
-        hooks
-    };
+fn build_settings() -> Value {
+    let post_edit_hooks =
+        vec![serde_json::json!({"type": "command", "command": "workflow-runner hook post-edit"})];
 
     serde_json::json!({
         "hooks": {
@@ -170,20 +144,10 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn setup_dir_with_rust_checks(include_hook: bool) -> tempfile::TempDir {
-        let dir = tempdir().unwrap();
-        let hooks_dir = dir.path().join(".claude/hooks");
-        std::fs::create_dir_all(&hooks_dir).unwrap();
-        if include_hook {
-            std::fs::write(hooks_dir.join("post-edit-rust-checks.sh"), "#!/bin/sh\n").unwrap();
-        }
-        dir
-    }
-
     #[test]
-    fn write_creates_settings_json() {
-        let dir = setup_dir_with_rust_checks(false);
-        write_settings_json(dir.path()).unwrap();
+    fn merge_creates_settings_json() {
+        let dir = tempdir().unwrap();
+        merge_settings_json(dir.path()).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
@@ -204,26 +168,9 @@ mod tests {
     }
 
     #[test]
-    fn write_includes_rust_checks_when_file_exists() {
-        let dir = setup_dir_with_rust_checks(true);
-        write_settings_json(dir.path()).unwrap();
-
-        let content = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
-        assert!(content.contains("post-edit-rust-checks.sh"));
-    }
-
-    #[test]
-    fn write_excludes_rust_checks_when_file_absent() {
-        let dir = setup_dir_with_rust_checks(false);
-        write_settings_json(dir.path()).unwrap();
-
-        let content = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
-        assert!(!content.contains("post-edit-rust-checks.sh"));
-    }
-
-    #[test]
     fn merge_preserves_non_wf_runner_hooks() {
-        let dir = setup_dir_with_rust_checks(false);
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
         let path = dir.path().join(".claude/settings.json");
 
         // Existing settings with a custom hook for Bash in PostToolUse.
@@ -264,7 +211,8 @@ mod tests {
 
     #[test]
     fn merge_replaces_old_wf_runner_hooks() {
-        let dir = setup_dir_with_rust_checks(false);
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
         let path = dir.path().join(".claude/settings.json");
 
         // Simulate outdated wf-runner hooks for Edit matcher.
@@ -299,5 +247,18 @@ mod tests {
 
         assert!(commands.contains(&"workflow-runner hook pre-edit"));
         assert!(!commands.contains(&"workflow-runner hook old-event"));
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let dir = tempdir().unwrap();
+
+        merge_settings_json(dir.path()).unwrap();
+        let once = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+
+        merge_settings_json(dir.path()).unwrap();
+        let twice = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+
+        assert_eq!(once, twice);
     }
 }

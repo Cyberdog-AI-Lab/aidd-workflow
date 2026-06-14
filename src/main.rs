@@ -83,10 +83,9 @@ enum Commands {
         /// Event type: post-bash | post-edit | pre-edit | pre-bash
         event_type: String,
     },
-    /// Initialize .workflow/ directory and generate .claude/settings.json.
-    Init,
-    /// Update .claude/settings.json with workflow-runner hooks (preserving existing entries).
-    Update,
+    /// Set up .workflow/ directory and .claude/settings.json with workflow-runner hooks
+    /// (preserving existing entries).
+    Setup,
     /// Print the JSON Schema for config.yml to stdout.
     DumpSchema,
 }
@@ -127,8 +126,7 @@ fn run(cmd: Commands, cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
         Commands::Validate { format } => cmd_validate(cwd, &format),
         Commands::List => cmd_list(cwd),
         Commands::Hook { event_type } => cmd_hook(cwd, &event_type),
-        Commands::Init => cmd_init(cwd),
-        Commands::Update => cmd_update(cwd),
+        Commands::Setup => cmd_setup(cwd),
         Commands::DumpSchema => cmd_dump_schema(),
     }
 }
@@ -522,7 +520,7 @@ fn read_stdin() -> Result<String> {
     Ok(buf)
 }
 
-fn cmd_init(cwd: &Path) -> Result<String> {
+fn cmd_setup(cwd: &Path) -> Result<String> {
     let workflow_dir = cwd.join(".workflow");
     std::fs::create_dir_all(&workflow_dir).context("failed to create .workflow directory")?;
 
@@ -535,21 +533,11 @@ fn cmd_init(cwd: &Path) -> Result<String> {
         eprintln!("warning: workflow-runner not found in PATH; ensure it is installed");
     }
 
-    infra::settings_writer::write_settings_json(cwd)?;
-
-    let out = serde_json::json!({
-        "ok": true,
-        "message": "initialized: .workflow/ and .claude/settings.json created"
-    });
-    Ok(serde_json::to_string_pretty(&out)?)
-}
-
-fn cmd_update(cwd: &Path) -> Result<String> {
     infra::settings_writer::merge_settings_json(cwd)?;
 
     let out = serde_json::json!({
         "ok": true,
-        "message": "updated: .claude/settings.json merged with workflow-runner hooks"
+        "message": "set up: .workflow/ created and .claude/settings.json merged with workflow-runner hooks"
     });
     Ok(serde_json::to_string_pretty(&out)?)
 }
