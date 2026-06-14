@@ -5,21 +5,6 @@ use std::path::Path;
 
 const WORKFLOW_RUNNER_CMD_PREFIX: &str = "workflow-runner hook";
 
-/// Writes `.claude/settings.json` from scratch with workflow-runner hook entries.
-pub fn write_settings_json(cwd: &Path) -> Result<()> {
-    let settings_dir = cwd.join(".claude");
-    std::fs::create_dir_all(&settings_dir).context("failed to create .claude directory")?;
-
-    let settings = build_settings();
-    let json = serde_json::to_string_pretty(&settings)?;
-
-    let path = settings_dir.join("settings.json");
-    std::fs::write(&path, json + "\n")
-        .with_context(|| format!("failed to write {}", path.display()))?;
-
-    Ok(())
-}
-
 /// Reads existing `.claude/settings.json` and merges workflow-runner hook entries,
 /// preserving all non-workflow-runner hooks.
 pub fn merge_settings_json(cwd: &Path) -> Result<()> {
@@ -160,9 +145,9 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn write_creates_settings_json() {
+    fn merge_creates_settings_json() {
         let dir = tempdir().unwrap();
-        write_settings_json(dir.path()).unwrap();
+        merge_settings_json(dir.path()).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
@@ -267,7 +252,6 @@ mod tests {
     #[test]
     fn merge_is_idempotent() {
         let dir = tempdir().unwrap();
-        write_settings_json(dir.path()).unwrap();
 
         merge_settings_json(dir.path()).unwrap();
         let once = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();

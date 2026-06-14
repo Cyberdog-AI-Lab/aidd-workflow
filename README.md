@@ -30,8 +30,8 @@ workflow-runner complete <task-id>
 
 ```bash
 # workflow-runner を PATH に配置後
-workflow-runner init
-# → .claude/settings.json を自動生成（シェルスクリプト不要）
+workflow-runner setup
+# → .workflow/ と .claude/settings.json を自動生成・更新（シェルスクリプト不要）
 ```
 
 ### 1. インストール（バイナリ配布）
@@ -86,8 +86,7 @@ vars:
 ./target/debug/workflow-runner status --format table                   # 現在の状態（ターミナルテーブル）
 ./target/debug/workflow-runner validate                                # config.yml 検証（JSON）
 ./target/debug/workflow-runner validate --format text                  # config.yml 検証（人間可読）
-./target/debug/workflow-runner init                                    # .claude/settings.json を生成
-./target/debug/workflow-runner update                                  # settings.json の hook 設定を更新
+./target/debug/workflow-runner setup                                   # .workflow/ と .claude/settings.json を生成・更新
 ```
 
 ## ワークフローの追加
@@ -209,8 +208,6 @@ src/                             # workflow-runner（Rust）
 ├── agents/                      カスタムエージェント定義（agents: で参照）
 │   ├── run-test.md
 │   └── run-lint.md
-├── hooks/
-│   └── post-edit-rust-checks.sh  .rs 編集後の自動品質チェック
 └── skills/
     ├── workflow-runner/SKILL.md
     └── workflow-creator/SKILL.md
