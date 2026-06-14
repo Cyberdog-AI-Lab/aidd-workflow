@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/cyberdog/aidd-workflow/main/install
 特定バージョンを指定する場合：
 
 ```bash
-VERSION=v0.2.0 bash <(curl -fsSL https://raw.githubusercontent.com/cyberdog/aidd-workflow/main/install.sh)
+VERSION=v0.0.1 bash <(curl -fsSL https://raw.githubusercontent.com/cyberdog/aidd-workflow/main/install.sh)
 ```
 
 ### 2. ビルド（ソースから）

@@ -60,6 +60,22 @@ mv "${TMP}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
 chmod +x "${INSTALL_DIR}/${BINARY}"
 
 echo "Installed ${INSTALL_DIR}/${BINARY}"
-if ! echo "${PATH}" | grep -q "${INSTALL_DIR}"; then
-  echo "Add ${INSTALL_DIR} to your PATH to use ${BINARY}"
+
+# Add INSTALL_DIR to PATH via shell rc file if not already present
+if ! echo "${PATH}" | tr ':' '\n' | grep -qx "${INSTALL_DIR}"; then
+  case "${SHELL:-}" in
+    */zsh)  RC_FILE="${HOME}/.zshrc" ;;
+    */bash) RC_FILE="${HOME}/.bashrc" ;;
+    *)      RC_FILE="${HOME}/.profile" ;;
+  esac
+
+  PATH_LINE="export PATH=\"${INSTALL_DIR}:\${PATH}\""
+
+  if [ -f "${RC_FILE}" ] && grep -qF "${PATH_LINE}" "${RC_FILE}"; then
+    echo "${INSTALL_DIR} is already configured in ${RC_FILE}"
+  else
+    printf '\n# Added by %s installer\n%s\n' "${BINARY}" "${PATH_LINE}" >> "${RC_FILE}"
+    echo "Added ${INSTALL_DIR} to PATH in ${RC_FILE}"
+    echo "Run 'source ${RC_FILE}' or restart your shell to use ${BINARY}"
+  fi
 fi
