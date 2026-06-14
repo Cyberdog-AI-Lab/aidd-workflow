@@ -37,13 +37,13 @@ workflow-runner setup
 ### 1. インストール（バイナリ配布）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cyberdog/aidd-workflow/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Cyberdog-AI-Lab/aidd-workflow/main/install.sh | bash
 ```
 
 特定バージョンを指定する場合：
 
 ```bash
-VERSION=v0.0.1 bash <(curl -fsSL https://raw.githubusercontent.com/cyberdog/aidd-workflow/main/install.sh)
+VERSION=v0.0.1 bash <(curl -fsSL https://raw.githubusercontent.com/Cyberdog-AI-Lab/aidd-workflow/main/install.sh)
 ```
 
 ### 2. ビルド（ソースから）

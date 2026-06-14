@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="cyberdog/aidd-workflow"
+REPO="Cyberdog-AI-Lab/aidd-workflow"
 BINARY="workflow-runner"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 

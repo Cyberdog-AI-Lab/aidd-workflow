@@ -228,8 +228,7 @@ status [--format json|table]   現在の実行状態を返す
 validate [--format json|text]  config.yml を検証する
 list                           ワークフロー一覧を返す
 hook <event-type>              Claude Code フックイベントを処理（stdin: hook JSON）
-init                           .claude/settings.json を生成・初期化する
-update                         .claude/settings.json の workflow-runner hook 設定を更新する
+setup                          .claude/settings.json の workflow-runner hook 設定を更新する
 dump-schema                    config.yml の JSON Schema を stdout に出力する
 ```
 
