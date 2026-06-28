@@ -22,6 +22,8 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 // ── Binary resolution ─────────────────────────────────────────────────────────
@@ -410,4 +412,242 @@ pub fn minimal_report(task_id: &str) -> serde_json::Value {
         "exit_code": 0,
         "stdout": null
     })
+}
+
+// ── run subcommand helpers ────────────────────────────────────────────────────
+
+/// Allocates a free TCP port by binding to 127.0.0.1:0 and immediately
+/// releasing it.  Used by `run` tests to avoid default-port conflicts when
+/// multiple tests execute in parallel.
+pub fn pick_free_port() -> u16 {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("pick_free_port: failed to bind :0");
+    listener.local_addr().unwrap().port()
+    // listener is dropped here, releasing the port
+}
+
+// ── MockWebhook ───────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct MockState {
+    received: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+async fn mock_webhook_handler(
+    axum::extract::State(s): axum::extract::State<MockState>,
+    body: String,
+) -> &'static str {
+    let json = serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::Value::Null);
+    s.received.lock().unwrap().push(json);
+    "ok"
+}
+
+/// A minimal axum-based HTTP server that records every incoming POST body as
+/// JSON.  Simulates `channels/webhook.ts` in `workflow-runner run` tests.
+pub struct MockWebhook {
+    /// Port this server is listening on.
+    pub port: u16,
+    state: MockState,
+    /// Keeps the tokio runtime alive; dropping this shuts the server down.
+    _rt: tokio::runtime::Runtime,
+}
+
+impl MockWebhook {
+    /// Bind on a random port and start serving synchronously.
+    pub fn start() -> Self {
+        let state = MockState {
+            received: Arc::new(Mutex::new(Vec::new())),
+        };
+        let state_for_app = state.clone();
+
+        let rt =
+            tokio::runtime::Runtime::new().expect("MockWebhook: failed to create tokio runtime");
+
+        let port = rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("MockWebhook: failed to bind listener");
+            let port = listener.local_addr().unwrap().port();
+
+            let app = axum::Router::new()
+                .route("/", axum::routing::post(mock_webhook_handler))
+                .with_state(state_for_app);
+
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.ok();
+            });
+
+            port
+        });
+
+        Self {
+            port,
+            state,
+            _rt: rt,
+        }
+    }
+
+    /// Base URL of the mock server, e.g. `"http://127.0.0.1:54321"`.
+    /// Pass this to `--webhook-url` or `TempProject::start_run`.
+    pub fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// Block until at least `n` POST bodies have been received, then return
+    /// a snapshot.  Panics if `timeout` elapses before `n` arrive.
+    pub fn wait_for_n(&self, n: usize, timeout: Duration) -> Vec<serde_json::Value> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let received = self.state.received.lock().unwrap();
+                if received.len() >= n {
+                    return received.clone();
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "MockWebhook timeout: expected {} dispatches, got {}",
+                n,
+                self.state.received.lock().unwrap().len()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Snapshot of all received POST bodies.
+    pub fn received(&self) -> Vec<serde_json::Value> {
+        self.state.received.lock().unwrap().clone()
+    }
+
+    /// Number of POST bodies received so far.
+    pub fn count(&self) -> usize {
+        self.state.received.lock().unwrap().len()
+    }
+
+    /// Discard all previously received bodies.
+    pub fn clear(&self) {
+        self.state.received.lock().unwrap().clear();
+    }
+}
+
+// ── RunningProcess ────────────────────────────────────────────────────────────
+
+/// A running `workflow-runner run` background process.
+/// Provides helpers for driving the workflow via HTTP callbacks.
+/// The child process is killed when this value is dropped.
+pub struct RunningProcess {
+    child: std::process::Child,
+    /// Port that the callback HTTP server is listening on.
+    pub callback_port: u16,
+    client: reqwest::blocking::Client,
+}
+
+impl RunningProcess {
+    fn post(&self, path: &str) {
+        self.client
+            .post(format!("http://127.0.0.1:{}{}", self.callback_port, path))
+            .send()
+            .unwrap_or_else(|e| panic!("RunningProcess: failed to POST {path}: {e}"));
+    }
+
+    fn post_json(&self, path: &str, body: serde_json::Value) {
+        self.client
+            .post(format!("http://127.0.0.1:{}{}", self.callback_port, path))
+            .json(&body)
+            .send()
+            .unwrap_or_else(|e| panic!("RunningProcess: failed to POST {path} with body: {e}"));
+    }
+
+    /// `POST /complete/<task_id>`.
+    pub fn complete(&self, task_id: &str) {
+        self.post(&format!("/complete/{task_id}"));
+    }
+
+    /// `POST /next` — approves the current `awaiting_approval` task.
+    pub fn approve(&self) {
+        self.post("/next");
+    }
+
+    /// `POST /reject/<task_id>`.
+    pub fn reject(&self, task_id: &str) {
+        self.post(&format!("/reject/{task_id}"));
+    }
+
+    /// `POST /reject/<task_id>` with `{"reason": ...}` body.
+    pub fn reject_with_reason(&self, task_id: &str, reason: &str) {
+        self.post_json(
+            &format!("/reject/{task_id}"),
+            serde_json::json!({ "reason": reason }),
+        );
+    }
+
+    /// Block until the process exits and return its exit status.
+    /// Kills the process and panics if `timeout` elapses first.
+    pub fn wait_exit(&mut self, timeout: Duration) -> std::process::ExitStatus {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return status,
+                Ok(None) => {}
+                Err(e) => panic!("RunningProcess: error checking exit status: {e}"),
+            }
+            if Instant::now() >= deadline {
+                self.child.kill().ok();
+                panic!("RunningProcess: timeout waiting for workflow-runner run to exit");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for RunningProcess {
+    fn drop(&mut self) {
+        self.child.kill().ok();
+        self.child.wait().ok();
+    }
+}
+
+// ── TempProject run extensions ────────────────────────────────────────────────
+
+impl TempProject {
+    /// Spawn `workflow-runner run <workflow>` in the background with a specific
+    /// callback port and webhook URL.
+    ///
+    /// Use `pick_free_port()` for `callback_port` and `MockWebhook::url()` for
+    /// `webhook_url` to avoid port conflicts between parallel tests.
+    pub fn start_run(
+        &self,
+        workflow: &str,
+        callback_port: u16,
+        webhook_url: &str,
+    ) -> RunningProcess {
+        let child = Command::new(binary_path())
+            .arg("--cwd")
+            .arg(self.path())
+            .args(["run", workflow])
+            .args(["--callback-port", &callback_port.to_string()])
+            .args(["--webhook-url", webhook_url])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("start_run: failed to spawn workflow-runner: {e}"));
+        RunningProcess {
+            child,
+            callback_port,
+            client: reqwest::blocking::Client::new(),
+        }
+    }
+
+    /// Spawn `workflow-runner` with arbitrary args in the background and return
+    /// the raw `Child`.  The caller must kill and wait on the process.
+    pub fn run_background(&self, args: &[&str]) -> std::process::Child {
+        Command::new(binary_path())
+            .arg("--cwd")
+            .arg(self.path())
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("run_background: failed to spawn workflow-runner: {e}"))
+    }
 }
