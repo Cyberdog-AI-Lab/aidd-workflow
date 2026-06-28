@@ -15,75 +15,135 @@ aidd-workflow の中長期ロードマップ。
 
 ---
 
-## v0.0.3: 自律駆動型ワークフロー
+## v0.0.2: 自律駆動型ワークフロー
 
-Claude Code セッション外からワークフローを駆動できるようにし、AI ツール呼び出しの標準化（MCP 化）と外部プロセスによる自律実行を実現するフェーズ。
+`workflow-runner` を **外部プロセスとして常駐させ**、Claude Code Channels 経由でタスクを push し、
+HTTP コールバックで完了を受け取ることで、人手を介さずワークフローをエンドツーエンドで実行するフェーズ。
 
-### Item 1: MCP サーバー化
+### アーキテクチャ概要
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  workflow-runner run <workflow>                                  │
+│  （常駐外部プロセス / オーケストレーター）                          │
+│                                                                │
+│  HTTP コールバックサーバー: 127.0.0.1:8789                       │
+│  ├─ POST /complete/:task_id   タスク完了受信 → 次タスク dispatch  │
+│  ├─ POST /report/:task_id     中間レポート受信（任意）             │
+│  └─ POST /reject/:task_id     タスク却下（approval フロー用）     │
+│                                                                │
+│  ループ:                                                         │
+│    1. config.yml 読み込み、ワークフロー開始（SQLite に記録）        │
+│    2. build_next() で実行可能タスクを決定（DAG 評価）              │
+│    3. タスク指示 JSON を Channels webhook (8788) に POST         │
+│    4. /complete/:task_id のコールバックを待つ                     │
+│    5. complete() → 状態更新 → 2 に戻る                          │
+│    6. awaiting_approval → /next または /reject を待つ            │
+│    7. completed → プロセス終了                                   │
+└──────────────┬─────────────────────────────────────────────────┘
+               │ POST http://127.0.0.1:8788/
+               │ { task_id, task, prompt, callback_url, ... }
+               ▼
+┌────────────────────────────────────────────────────────────────┐
+│  channels/webhook.ts（Channels MCP サーバー）                    │
+│  - HTTP → MCP notification → Claude Code セッション              │
+└──────────────┬─────────────────────────────────────────────────┘
+               │ <channel source="webhook"> イベント
+               │ { task_id, task, prompt, callback_url, ... }
+               ▼
+┌────────────────────────────────────────────────────────────────┐
+│  Claude Code セッション（常時待機 / ワーカー）                      │
+│  - channel 受信 → タスク内容に従って実行（コード編集・テスト等）     │
+│  - 完了後 → curl -X POST {callback_url}/complete/{task_id}      │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**役割分担**:
+
+| コンポーネント | 責務 |
+|----------------|------|
+| `workflow-runner run` | 状態管理・DAG 評価・タスク dispatch・承認ゲート制御 |
+| `channels/webhook.ts` | HTTP → Channels MCP 変換（既存のまま流用） |
+| Claude Code | タスクの実行のみ（コード編集・テスト・ドキュメント更新等） |
+
+---
+
+### Item 1: workflow-runner 常駐オーケストレーターモード
 
 #### 目標
 
-`workflow-runner` を [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) サーバーとして動作させ、
-Claude Code・Cursor・その他 MCP 対応クライアントから **ツール呼び出し** でワークフローを操作できるようにする。
+`workflow-runner run <workflow>` コマンドを追加し、
+ワークフロー全体を外部プロセスとして自律実行できるようにする。
 
-#### 背景・動機
+#### 実装内容
 
-現在の Claude Code 統合は SKILL.md（薄いブリッジ）+ CLI 呼び出しで成立している。
-MCP サーバー化により以下が実現する：
-
-- **統合の標準化** — SKILL.md の管理が不要になり、MCP 対応クライアントであればそのまま接続できる
-- **双方向通知** — サーバー主導でクライアントに通知を送れる（ステップ完了・承認要求など）
-- **ツール設計の明確化** — フック（Hooks）と MCP ツールでの役割分担が明確になる
-- **マルチクライアント対応** — Cursor・Copilot・カスタムエージェントが同一プロトコルで接続できる
-
-#### アーキテクチャ概要
-
-```
-MCP クライアント（Claude Code / Cursor / 任意エージェント）
-        │
-        │  MCP プロトコル（stdio / SSE）
-        │
-┌───────▼─────────────────────────────────────┐
-│        workflow-runner MCP サーバー           │
-│                                              │
-│  MCP ツール（Claude Code ツール呼び出しに対応） │
-│   workflow_start(workflow, cwd?)             │
-│   workflow_next(workflow_id?)                │
-│   workflow_complete(task_id, workflow_id?)   │
-│   workflow_reject(task_id, reason?)          │
-│   workflow_status(workflow_id?)              │
-│   workflow_list(cwd?)                        │
-│   workflow_validate(cwd?)                    │
-└───────┬─────────────────────────────────────┘
-        │
-        │  既存 engine 層をそのまま呼び出す
-        ▼
-  .workflow/workflow.db（SQLite）
-```
-
-#### 実装方針
-
-1. **既存 CLI プロトコルは維持** — `workflow-runner <command>` は引き続き動作する
-2. **MCP レイヤーを追加** — `src/mcp/` として新モジュールを追加し、`engine` 層を直接呼ぶ
-3. **起動モード切り替え** — `workflow-runner serve` で MCP サーバーとして起動
-4. **Hook は維持** — `pre-edit` / `pre-bash` / `post-edit` は CLI フックのまま（MCP ツールとしては提供しない）
+1. **`run` サブコマンドの追加** — `src/cmd/run.rs` として実装
+   - `workflow-runner run <workflow> [--cwd <path>]`
+   - 内部で `start` → `build_next` → dispatch ループを非同期で実行
+2. **HTTP コールバックサーバーの組み込み** — `tokio` + `hyper`（または `axum`）
+   - `POST /complete/:task_id` — `cmd_complete()` を呼び出し、次タスクを dispatch
+   - `POST /report/:task_id` — `cmd_report()` を呼び出して中間状態を記録
+   - `POST /next` — `awaiting_approval` の承認（外部ツールや人手から呼べる）
+   - `POST /reject/:task_id` — タスクの却下と再 dispatch
+3. **Channels webhook への POST** — `reqwest` クレートで `127.0.0.1:8788` に投げる
+   - ペイロード: `{ task_id, task, prompt, callback_url, workflow_id }`
+   - `callback_url`: `http://127.0.0.1:8789`（コールバックサーバーのベース URL）
+4. **既存 CLI コマンドは維持** — `start` / `next` / `complete` 等は引き続き動作する
 
 #### 使用クレート候補
 
 | クレート | 用途 |
 |---------|------|
-| `rmcp` / `mcp-server-sdk` | Rust 製 MCP サーバー実装 |
-| `tokio` | 非同期ランタイム（MCP サーバーに必要） |
+| `tokio` | 非同期ランタイム |
+| `axum` | HTTP コールバックサーバー |
+| `reqwest` | Channels webhook への HTTP POST |
 
-#### 設定例（Claude Code 側）
+#### 完了基準
+
+- `workflow-runner run bug-fix` を実行するとワークフローが自律的にエンドツーエンドで完了する
+- 既存の CLI（`workflow-runner start` / `complete` 等）が引き続き動作する
+- `cargo test` が全て通過する
+
+---
+
+### Item 2: Channels 統合 & Claude Code ワーカー設定
+
+#### 目標
+
+Claude Code が Channels 経由でタスク指示を受け取り、実行後に HTTP コールバックで報告できるようにする。
+SKILL.md は廃止し、Claude Code の動作は MCP サーバーの `instructions` フィールドで定義する。
+
+#### 実装内容
+
+1. **タスク指示 JSON 形式の標準化** — `channels/webhook.ts` の instruction を更新
+   ```json
+   {
+     "task_id": "implement",
+     "task": "実装する",
+     "prompt": "設計書に従って実装してください。...",
+     "callback_url": "http://127.0.0.1:8789",
+     "workflow_id": "4fd261ba-...",
+     "outputs": ["src/**", "tests/**"],
+     "deny": { "files": [".env"] }
+   }
+   ```
+2. **Claude Code ワーカー指示の整備** — `channels/webhook.ts` の `instructions` を拡張
+   - channel 受信 → `task_id` / `prompt` を取り出してタスクを実行
+   - 実行完了後 → `curl -sX POST {callback_url}/complete/{task_id}` でコールバック
+   - `outputs` / `deny` は自身の動作を制約する情報として使用
+3. **SKILL.md の廃止** — `.claude/skills/workflow-runner/` を削除
+   - ワークフロー起動は外部から `workflow-runner run <workflow>` を呼ぶ方式に移行
+
+#### Channels MCP 設定例
 
 ```json
-// .claude/mcp.json（プロジェクトレベル設定）
+// .claude/mcp.json
 {
   "mcpServers": {
-    "workflow-runner": {
-      "command": "workflow-runner",
-      "args": ["serve"]
+    "webhook": {
+      "command": "bun",
+      "args": ["run", "channels/webhook.ts"],
+      "env": { "PORT": "8788" }
     }
   }
 }
@@ -91,111 +151,25 @@ MCP クライアント（Claude Code / Cursor / 任意エージェント）
 
 #### 完了基準
 
-- `workflow-runner serve` で MCP サーバーが起動する
-- Claude Code の MCP クライアントから `workflow_start` / `workflow_complete` が呼び出せる
-- 既存の CLI（`workflow-runner start` 等）が引き続き動作する
-- SKILL.md なしで Claude Code からワークフローを操作できる
-- `cargo test` が全て通過する
+- Claude Code セッションを開いた状態で `workflow-runner run bug-fix` を実行すると、
+  人手を介さずワークフローがエンドツーエンドで完了する
+- `awaiting_approval` タスクで自動停止し、外部から `/next` または `/reject` を呼べる
+- SKILL.md なしでワークフローが動作する
 - README.md / ARCHITECTURE.md が更新されている
 
 ---
 
-### Item 2: 外部プロセスによる自律ワークフロー制御
+### Item 3: 通知・承認統合（Item 1 完了後）
 
 #### 目標
 
-`workflow-runner` を外部プロセスから駆動し、AI ツールのセッション外で **完全自律的に** ワークフローをエンドツーエンド実行する。
-Claude Code の **Channels（Research Preview）** の活用を検討する。
+`awaiting_approval` で停止したワークフローを外部サービス（Slack / GitHub）経由で承認・却下できるようにする。
 
-#### 背景・動機
+#### 実装内容
 
-現行の Claude Code Skill 統合は「人間がセッションを開いて `/workflow-runner` を呼ぶ」モデル。
-外部プロセス駆動により以下が開放される：
-
-- CI/CD パイプライン（Git push → 自動バグ修正・自動テスト修正）
-- スケジューラー / cron による定期ワークフロー実行
-- `awaiting_approval` タスクの Slack / GitHub 通知と外部承認
-- 複数プロジェクトの並列ワークフロー監視
-
-#### Claude Code Channels（Research Preview）の役割
-
-Claude Code の Channels は **プロセス間通信チャンネル** を提供する Research Preview 機能。
-外部プロセスが Claude Code セッションに命令を送ったり、セッションの出力を受け取る用途を想定する。
-
-```
-外部コントローラー
-    │
-    │  Channels API（stdin/stdout または WebSocket）
-    ▼
-Claude Code セッション（Channels 経由で受信）
-    │
-    │  SKILL.md または MCP ツール呼び出し
-    ▼
-workflow-runner（CLI / MCP）
-    │
-    ▼
-.workflow/workflow.db
-```
-
-> **検討事項**: Channels の仕様は Research Preview のため変動する可能性がある。
-> Channels が利用できない場合は代替の `claude -p`（非インタラクティブモード）で同等の動作を実現する。
-
-#### 外部コントローラーの設計
-
-```
-┌────────────────────────────────────────────────────┐
-│            外部コントローラー（Rust バイナリ）         │
-│                                                    │
-│  1. workflow-runner start <workflow>               │
-│       → { workflow_id, tasks: [...] }             │
-│                                                    │
-│  2. tasks を受け取り、AI ツール（Claude Code 等）   │
-│     に実行を依頼する                                │
-│     （Channels / claude -p / MCP ツール呼び出し）   │
-│                                                    │
-│  3. 完了後: workflow-runner complete <task-id>     │
-│       → { allowed: true, next: { ... } }          │
-│                                                    │
-│  4. awaiting_approval → 外部通知（Slack / GitHub） │
-│     承認後: workflow-runner next                   │
-│                                                    │
-│  5. completed まで 2–4 をループ                    │
-└────────────────────────────────────────────────────┘
-```
-
-#### 実装候補の比較
-
-| アプローチ | メリット | デメリット | 優先度 |
-|-----------|---------|-----------|--------|
-| A: Claude Code Channels 利用 | セッション管理が Claude Code 側に委譲できる | Research Preview 段階・API 未確定 | 調査優先 |
-| B: `claude -p`（非インタラクティブ） | 安定・既存ツールで完結 | セッション状態の引き継ぎが手動 | フォールバック |
-| C: Anthropic Messages API 直接呼び出し | AI ツール非依存・完全制御可能 | コンテキスト管理・ツール定義を自前で実装する必要がある | 汎用化時 |
-
-#### フェーズ分割
-
-##### `claude -p` ベースのプロトタイプ
-
-- 外部コントローラーを Rust バイナリ（または shell スクリプト）として実装
-- `claude -p "<prompt>"` でタスクを実行し、完了後に `workflow-runner complete` を呼ぶ
-- ログ・可観測性（JSON ログ出力、実行トレース）の基盤を作る
-- `--dry-run` フラグで実際の AI 呼び出しをスキップして制御フローを検証できるようにする
-
-##### Claude Code Channels 統合
-
-- Channels の仕様が安定したタイミングで Channels ベースに移行
-- セッションの起動・停止・出力の受け取りを Channels API 経由で制御
-- 並列ステップの並列セッション起動を実現
-
-##### 通知・承認統合
-
-- `awaiting_approval` 時に外部サービスへ通知（Slack Webhook / GitHub PR コメント）
-- 外部から `workflow-runner next`（承認）または `workflow-runner reject`（却下）を呼ぶ webhook エンドポイント
-
-#### 完了基準
-
-- Claude Code セッション外からワークフローをエンドツーエンドで実行できる
-- `cargo test` が全て通過する
-- ドキュメント（ARCHITECTURE.md / README.md）が更新されている
+- `awaiting_approval` 時に Slack Webhook または GitHub PR コメントへ通知
+- 通知に `/next`（承認）/ `/reject/:task_id`（却下）の URL を含める
+- webhook エンドポイントを公開するためのトンネル設定例（ngrok 等）を docs に追加
 
 ---
 
@@ -204,37 +178,29 @@ workflow-runner（CLI / MCP）
 ```
 現在地（v0.0.1）
     │
-    ├──▶ v0.0.2: ワークフローの視覚化（ダッシュボード作成） （独立して着手可能）
+    └──▶ v0.0.2: 自律駆動型ワークフロー
+    │         │
+    │         ├──▶ Item 1: workflow-runner 常駐オーケストレーターモード   🔲 未着手
+    │         │
+    │         ├──▶ Item 2: Channels 統合 & Claude Code ワーカー設定      🔲 未着手
+    │         │         （Item 1 と並行して着手可能）
+    │         │
+    │         └──▶ Item 3: 通知・承認統合                                🔲 Item 1 完了後
     │
-    └──▶ v0.0.3: 自律駆動型ワークフロー
-              │
-              ├──▶ Item 1: MCP サーバー化        （独立して着手可能）
-              │
-              └──▶ Item 2: 外部プロセス自律制御   （独立して着手可能）
-                        ├──  claude -p ベース      🔲 未着手
-                        ├──  Channels 統合         🔲 Channels 仕様確定後
-                        └──  通知・承認統合        🔲 完了後
+    └──▶ v0.0.3: ワークフローの視覚化（ダッシュボード作成） （独立して着手可能）
 ```
-
-v0.0.2（ダッシュボード可視化）は v0.0.3 のいずれの Item とも依存関係がない。
-既存の `.workflow/workflow.db` を読むだけで完結するため、優先して着手しても問題ない。
-
-Item 1 と Item 2 に依存関係はない。
-ただし **Item 1（MCP サーバー化）が完了すると Item 2 の AI ツール呼び出しが MCP 経由に一本化できる** ため、
-先に Item 1 を実装することで Item 2 の外部コントローラーが簡潔になる。
 
 ---
 
 ## 参考リンク
 
+- [Claude Code – Channels](https://docs.anthropic.com/ja/docs/claude-code/channels)
 - [Model Context Protocol 仕様](https://modelcontextprotocol.io/specification)
-- [Claude Code – MCP サーバー設定](https://docs.anthropic.com/ja/docs/claude-code/mcp)
-- [Claude Code – Research Preview: Channels](https://docs.anthropic.com/ja/docs/claude-code/channels)（要確認）
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — 現在のアーキテクチャ詳細
 
 ---
 
-## v0.0.2: ワークフローの視覚化（ダッシュボード作成）
+## v0.0.3: ワークフローの視覚化（ダッシュボード作成）
 
 ### 目標
 
