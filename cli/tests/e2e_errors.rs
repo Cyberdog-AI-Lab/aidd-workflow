@@ -72,9 +72,9 @@ fn report_unknown_task_id_exits_with_error() {
     let proj = TempProject::new(CONFIG_STANDARD);
     proj.start("bug-fix");
 
-    let body = minimal_report("phantom-task");
+    let body = minimal_report();
     let json = serde_json::to_string(&body).unwrap();
-    let stderr = proj.assert_err_with_stdin(&["report"], &json);
+    let stderr = proj.assert_err_with_stdin(&["report", "phantom-task"], &json);
     assert!(
         stderr.contains("phantom-task"),
         "error must mention the unknown task_id: got '{stderr}'"

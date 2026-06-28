@@ -16,12 +16,13 @@ use crate::config::loader::load_config;
 use crate::config::types::{Config, Workflow};
 use crate::engine::state::{ActionReport, StepStatus};
 use crate::engine::{dag, executor, gate, store};
-use crate::protocol::input::ReportInput;
+use crate::protocol::input::{CompleteInput, PauseInput, ReportInput};
 use crate::protocol::output::{FlowStatus, TaskOutput};
 
 enum RunEvent {
     Complete {
         task_id: String,
+        summary: Option<String>,
     },
     Report {
         task_id: String,
@@ -29,6 +30,10 @@ enum RunEvent {
     },
     Next,
     Reject {
+        task_id: String,
+        reason: Option<String>,
+    },
+    Pause {
         task_id: String,
         reason: Option<String>,
     },
@@ -46,8 +51,16 @@ struct RejectBody {
 async fn handle_complete(
     AxumPath(task_id): AxumPath<String>,
     State(state): State<Arc<AppState>>,
+    body: String,
 ) -> &'static str {
-    state.tx.send(RunEvent::Complete { task_id }).await.ok();
+    let summary = serde_json::from_str::<CompleteInput>(&body)
+        .ok()
+        .and_then(|b| b.summary);
+    state
+        .tx
+        .send(RunEvent::Complete { task_id, summary })
+        .await
+        .ok();
     "ok"
 }
 
@@ -81,6 +94,22 @@ async fn handle_reject(
     "ok"
 }
 
+async fn handle_pause(
+    AxumPath(task_id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+    body: String,
+) -> &'static str {
+    let reason = serde_json::from_str::<PauseInput>(&body)
+        .ok()
+        .and_then(|b| b.reason);
+    state
+        .tx
+        .send(RunEvent::Pause { task_id, reason })
+        .await
+        .ok();
+    "ok"
+}
+
 pub async fn run_workflow(
     cwd: PathBuf,
     workflow_name: String,
@@ -96,6 +125,7 @@ pub async fn run_workflow(
         .route("/report/:task_id", post(handle_report))
         .route("/next", post(handle_next))
         .route("/reject/:task_id", post(handle_reject))
+        .route("/pause/:task_id", post(handle_pause))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", callback_port))
@@ -128,6 +158,7 @@ pub async fn run_workflow(
 
     let initial = executor::build_next(&wf, &state, &config);
     dispatch_tasks(
+        &cwd,
         &initial.tasks,
         &callback_url,
         &webhook_url,
@@ -146,15 +177,17 @@ pub async fn run_workflow(
                 }
             }
 
-            Some(RunEvent::Complete { task_id }) => {
+            Some(RunEvent::Complete { task_id, summary }) => {
                 dispatched.remove(&task_id);
                 eprintln!("[run] task '{}' completed", task_id);
 
-                let next_tasks = complete_task(&cwd, &workflow_id, &task_id, &wf, &config)?;
+                let next_tasks =
+                    complete_task(&cwd, &workflow_id, &task_id, summary, &wf, &config)?;
 
                 // Workflow finished or awaiting approval when next_tasks is None
                 if let Some(tasks) = next_tasks {
                     dispatch_tasks(
+                        &cwd,
                         &tasks,
                         &callback_url,
                         &webhook_url,
@@ -185,14 +218,38 @@ pub async fn run_workflow(
 
             Some(RunEvent::Next) => {
                 let wf_status = store::get_workflow_status(&cwd, &workflow_id)?;
-                if wf_status != "awaiting_approval" {
+                if wf_status != "awaiting_approval" && wf_status != "paused" {
                     eprintln!(
-                        "[run] /next called but workflow is not awaiting approval (status: {})",
+                        "[run] /next called but workflow is not paused (status: {})",
                         wf_status
                     );
                     continue;
                 }
                 store::set_workflow_status(&cwd, &workflow_id, "active")?;
+
+                if wf_status == "paused" {
+                    // Re-dispatch in_progress tasks that were paused.
+                    let state = store::load_state_by_id(&cwd, &workflow_id)?
+                        .context("workflow state not found after resume")?;
+                    let in_progress: Vec<TaskOutput> = state
+                        .tasks
+                        .iter()
+                        .filter(|(_, s)| s.status == StepStatus::InProgress)
+                        .filter_map(|(id, _)| build_task_output(id, &wf, &config))
+                        .collect();
+                    dispatch_tasks(
+                        &cwd,
+                        &in_progress,
+                        &callback_url,
+                        &webhook_url,
+                        &workflow_id,
+                        &mut dispatched,
+                    )
+                    .await?;
+                    continue;
+                }
+
+                // awaiting_approval path
                 eprintln!("[run] approved; dispatching next tasks");
 
                 let state = store::load_state_by_id(&cwd, &workflow_id)?
@@ -207,6 +264,7 @@ pub async fn run_workflow(
                     break;
                 }
                 dispatch_tasks(
+                    &cwd,
                     &next.tasks,
                     &callback_url,
                     &webhook_url,
@@ -248,6 +306,7 @@ pub async fn run_workflow(
                 if let Some(t) = task_output {
                     dispatched.remove(&task_id);
                     dispatch_tasks(
+                        &cwd,
                         &[t],
                         &callback_url,
                         &webhook_url,
@@ -256,6 +315,30 @@ pub async fn run_workflow(
                     )
                     .await?;
                 }
+            }
+
+            Some(RunEvent::Pause { task_id, reason }) => {
+                store::set_workflow_status(&cwd, &workflow_id, "paused")?;
+
+                // Record the pause event in action_reports.
+                if let Ok(Some(mut state)) = store::load_state_by_id(&cwd, &workflow_id) {
+                    let s = state.tasks.entry(task_id.clone()).or_default();
+                    s.action_reports.push(ActionReport {
+                        action_index: s.action_reports.len(),
+                        action_type: "pause".to_string(),
+                        exit_code: None,
+                        stdout: reason.clone(),
+                        recorded_at: Utc::now(),
+                    });
+                    store::save_state(&cwd, &state).ok();
+                }
+                store::update_task_timestamp(&cwd, &workflow_id, &task_id).ok();
+
+                eprintln!(
+                    "[run] task '{}' paused — user input required: {}",
+                    task_id,
+                    reason.as_deref().unwrap_or("(no reason given)")
+                );
             }
         }
     }
@@ -270,6 +353,7 @@ pub fn complete_task(
     cwd: &Path,
     workflow_id: &str,
     task_id: &str,
+    summary: Option<String>,
     wf: &Workflow,
     config: &Config,
 ) -> Result<Option<Vec<TaskOutput>>> {
@@ -289,6 +373,13 @@ pub fn complete_task(
         let s = state.tasks.entry(task_id.to_string()).or_default();
         s.status = StepStatus::Completed;
         s.completed_at = Some(Utc::now());
+        s.action_reports.push(ActionReport {
+            action_index: s.action_reports.len(),
+            action_type: "complete".to_string(),
+            exit_code: None,
+            stdout: summary,
+            recorded_at: Utc::now(),
+        });
     }
 
     if let Some(parent_id) = dag::parent_of(task_id) {
@@ -317,6 +408,7 @@ pub fn complete_task(
 }
 
 /// Applies an intermediate action report from the Claude Code worker to the stored state.
+/// Does not change task status; status transitions happen via dispatch (InProgress) and complete.
 pub fn record_report(cwd: &Path, workflow_id: &str, task_id: &str, body: &str) -> Result<()> {
     let mut state =
         store::load_state_by_id(cwd, workflow_id)?.context("workflow state not found")?;
@@ -326,21 +418,19 @@ pub fn record_report(cwd: &Path, workflow_id: &str, task_id: &str, body: &str) -
     }
 
     let s = state.tasks.entry(task_id.to_string()).or_default();
-    if s.status == StepStatus::Pending {
-        s.status = StepStatus::InProgress;
-        s.started_at = Some(Utc::now());
-    }
-    if let Ok(input) = serde_json::from_str::<ReportInput>(body) {
-        s.action_reports.push(ActionReport {
-            action_index: input.action_index,
-            action_type: input.action_type,
-            exit_code: input.exit_code,
-            stdout: input.stdout,
-            recorded_at: Utc::now(),
-        });
-    }
+    let summary = serde_json::from_str::<ReportInput>(body)
+        .ok()
+        .and_then(|i| i.summary);
+    s.action_reports.push(ActionReport {
+        action_index: s.action_reports.len(),
+        action_type: "report".to_string(),
+        exit_code: None,
+        stdout: summary,
+        recorded_at: Utc::now(),
+    });
 
     store::save_state(cwd, &state)?;
+    store::update_task_timestamp(cwd, workflow_id, task_id)?;
     Ok(())
 }
 
@@ -364,6 +454,7 @@ fn build_task_output(task_id: &str, wf: &Workflow, config: &Config) -> Option<Ta
 }
 
 async fn dispatch_tasks(
+    cwd: &Path,
     tasks: &[TaskOutput],
     callback_url: &str,
     webhook_url: &str,
@@ -375,6 +466,7 @@ async fn dispatch_tasks(
         if dispatched.contains(&task.task_id) {
             continue;
         }
+        store::mark_task_dispatched(cwd, workflow_id, &task.task_id)?;
         let payload = serde_json::json!({
             "task_id": task.task_id,
             "task": task.task,
@@ -466,7 +558,7 @@ mod tests {
         let id = state.workflow_id.clone();
         store::save_state(cwd, &state).unwrap();
 
-        let next = complete_task(cwd, &id, "step-a", &wf, &config)
+        let next = complete_task(cwd, &id, "step-a", None, &wf, &config)
             .unwrap()
             .unwrap();
         assert_eq!(next.len(), 1);
@@ -485,7 +577,7 @@ mod tests {
         state.tasks.get_mut("step-a").unwrap().status = StepStatus::Completed;
         store::save_state(cwd, &state).unwrap();
 
-        let result = complete_task(cwd, &id, "step-b", &wf, &config).unwrap();
+        let result = complete_task(cwd, &id, "step-b", None, &wf, &config).unwrap();
         // None means workflow finished (cleared from store)
         assert!(result.is_none());
         assert!(store::load_state_by_id(cwd, &id).unwrap().is_none());
@@ -502,7 +594,7 @@ mod tests {
         let id = state.workflow_id.clone();
         store::save_state(cwd, &state).unwrap();
 
-        let result = complete_task(cwd, &id, "review", &wf, &config).unwrap();
+        let result = complete_task(cwd, &id, "review", None, &wf, &config).unwrap();
         assert!(result.is_none());
         assert_eq!(
             store::get_workflow_status(cwd, &id).unwrap(),
@@ -511,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn record_report_transitions_to_in_progress() {
+    fn record_report_appends_action_report() {
         let dir = TempDir::new().unwrap();
         let cwd = dir.path();
         let wf = linear_workflow();
@@ -533,7 +625,8 @@ mod tests {
         record_report(cwd, &id, "step-a", &body).unwrap();
 
         let loaded = store::load_state_by_id(cwd, &id).unwrap().unwrap();
-        assert_eq!(loaded.tasks["step-a"].status, StepStatus::InProgress);
+        // Status remains Pending; InProgress is now set by dispatch (mark_task_dispatched).
+        assert_eq!(loaded.tasks["step-a"].status, StepStatus::Pending);
         assert_eq!(loaded.tasks["step-a"].action_reports.len(), 1);
     }
 

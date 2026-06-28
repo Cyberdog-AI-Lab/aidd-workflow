@@ -468,12 +468,23 @@ gate::check:
 
 ```
 Pending
-  │  ← report（初回かつ Pending の場合のみ InProgress に遷移。既に InProgress なら変更しない）
+  │  ← dispatch_tasks（run プロセスが直接 InProgress に遷移し started_at / updated_at を記録）
   ▼
 InProgress
-  │  ← complete → gate::check()（requires + agents）通過
+  │  ← report（ActionReport を追記し updated_at を更新するのみ。ステータス変更なし）
+  │  ← pause（ワークフローを paused 状態にし、action_reports に記録）
+  │  ← complete → gate::check()（requires + agents）通過後 Completed に遷移
   ▼
 Completed
+```
+
+ワークフロー status の遷移：
+
+```
+active
+  ├─ complete (approval=true) → awaiting_approval
+  ├─ pause                    → paused
+  └─ next (awaiting_approval または paused) → active
 ```
 
 > **`Failed` について**: `StepStatus` enum に `Failed` variant が定義されており、`dag.executable_items()` では `Completed` と同様にスキップされる。ただし現バージョンでは `Failed` に遷移するコードパスは存在せず、将来の拡張のために予約されている。

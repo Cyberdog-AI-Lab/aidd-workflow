@@ -330,9 +330,9 @@ impl TempProject {
     }
 
     /// `workflow-runner report` with the given JSON body → parsed JSON.
-    pub fn report(&self, body: &serde_json::Value) -> serde_json::Value {
+    pub fn report(&self, task_id: &str, body: &serde_json::Value) -> serde_json::Value {
         let json = serde_json::to_string(body).expect("failed to serialize report body");
-        self.assert_ok_with_stdin(&["report"], &json)
+        self.assert_ok_with_stdin(&["report", task_id], &json)
     }
 
     /// `workflow-runner reject <task_id>` → parsed JSON.
@@ -403,15 +403,8 @@ pub fn hook_bash_json(project_root: &Path, command: &str) -> String {
 ///
 /// `session_id` is required by the protocol but not validated at runtime,
 /// so a fixed placeholder value is used.
-pub fn minimal_report(task_id: &str) -> serde_json::Value {
-    serde_json::json!({
-        "session_id": "test-session",
-        "task_id":    task_id,
-        "action_index": 0,
-        "action_type": "prompt",
-        "exit_code": 0,
-        "stdout": null
-    })
+pub fn minimal_report() -> serde_json::Value {
+    serde_json::json!({ "summary": null })
 }
 
 // ── run subcommand helpers ────────────────────────────────────────────────────

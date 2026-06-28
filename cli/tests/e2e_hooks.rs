@@ -69,8 +69,8 @@ fn bash_json(proj: &TempProject, command: &str) -> String {
 /// Hooks only fire for InProgress tasks.
 fn activate_implement(proj: &TempProject) {
     proj.start("guarded");
-    let body = minimal_report("implement");
-    proj.report(&body);
+    let body = minimal_report();
+    proj.report("implement", &body);
 }
 
 /// Parse `output.stdout` as a JSON Value; panics with stdout content on failure.

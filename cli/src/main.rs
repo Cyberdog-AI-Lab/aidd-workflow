@@ -69,8 +69,8 @@ enum Commands {
     Start { workflow: String },
     /// Return the next set of tasks. When awaiting approval, calling this approves and proceeds.
     Next,
-    /// Record a task execution result (stdin: JSON).
-    Report,
+    /// Record a task progress report (stdin: JSON with optional summary field).
+    Report { task_id: String },
     /// Mark a task as complete (with gate check).
     Complete { task_id: String },
     /// Reject an awaiting-approval task and retry it.
@@ -155,7 +155,7 @@ fn run(cmd: Commands, cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
         }
         Commands::Start { workflow } => cmd_start(cwd, &workflow),
         Commands::Next => cmd_next(cwd, workflow_id),
-        Commands::Report => cmd_report(cwd, workflow_id),
+        Commands::Report { task_id } => cmd_report(cwd, &task_id, workflow_id),
         Commands::Complete { task_id } => cmd_complete(cwd, &task_id, workflow_id),
         Commands::Reject { task_id, reason } => {
             cmd_reject(cwd, &task_id, reason.as_deref(), workflow_id)
@@ -213,56 +213,49 @@ fn cmd_next(cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
-fn cmd_report(cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
+fn cmd_report(cwd: &Path, task_id: &str, workflow_id: Option<&str>) -> Result<String> {
     let input_str = read_stdin()?;
-    let input: ReportInput =
-        serde_json::from_str(&input_str).context("report stdin is not valid JSON")?;
+    let summary = serde_json::from_str::<ReportInput>(&input_str)
+        .ok()
+        .and_then(|i| i.summary);
 
     let config = load_config(cwd)?;
     let mut state = resolve_state(cwd, workflow_id)?.context("no workflow in progress")?;
-
     let wf = config
         .workflows
         .get(&state.workflow)
         .with_context(|| format!("workflow '{}' not found", state.workflow))?;
 
-    // Reject reports for task IDs that were never initialised in the workflow state.
-    // state.tasks is pre-populated from wf.tasks by WorkflowState::new, so an unknown
-    // ID means either a typo or a stale task from a different workflow.
-    if !state.tasks.contains_key(&input.task_id) {
+    if !state.tasks.contains_key(task_id) {
         anyhow::bail!(
             "unknown task_id '{}' for workflow '{}'",
-            input.task_id,
+            task_id,
             state.workflow
         );
     }
 
     {
-        let s = state.tasks.entry(input.task_id.clone()).or_default();
+        let s = state.tasks.entry(task_id.to_string()).or_default();
         if s.status == StepStatus::Pending {
             s.status = StepStatus::InProgress;
             s.started_at = Some(Utc::now());
         }
-    }
-
-    {
-        let s = state.tasks.entry(input.task_id.clone()).or_default();
         s.action_reports.push(ActionReport {
-            action_index: input.action_index,
-            action_type: input.action_type.clone(),
-            exit_code: input.exit_code,
-            stdout: input.stdout.clone(),
+            action_index: s.action_reports.len(),
+            action_type: "report".to_string(),
+            exit_code: None,
+            stdout: summary,
             recorded_at: Utc::now(),
         });
     }
 
-    if let Some(parent_id) = dag::parent_of(&input.task_id) {
+    if let Some(parent_id) = dag::parent_of(task_id) {
         state.sync_agents_parent(parent_id, wf)?;
     }
 
     save_state(cwd, &state)?;
 
-    let out = serde_json::json!({ "ok": true, "task_id": input.task_id });
+    let out = serde_json::json!({ "ok": true, "task_id": task_id });
     Ok(out.to_string())
 }
 

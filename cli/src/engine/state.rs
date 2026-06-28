@@ -21,6 +21,7 @@ pub struct StepState {
     pub status: StepStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub action_reports: Vec<ActionReport>,
 }

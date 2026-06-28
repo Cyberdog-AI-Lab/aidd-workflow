@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS step_states (
     status         TEXT NOT NULL DEFAULT 'pending',
     started_at     TEXT,
     completed_at   TEXT,
+    updated_at     TEXT,
     PRIMARY KEY (workflow_id, step_id)
 );
 
@@ -54,6 +55,8 @@ fn open_db(cwd: &Path) -> Result<Connection> {
     let conn = Connection::open(dir.join("workflow.db")).context("failed to open workflow.db")?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(SCHEMA)?;
+    // Migration: add updated_at column to existing databases (error is ignored if column already exists).
+    let _ = conn.execute_batch("ALTER TABLE step_states ADD COLUMN updated_at TEXT;");
     Ok(conn)
 }
 
@@ -89,7 +92,7 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
         .with_timezone(&Utc);
 
     let mut stmt = conn.prepare(
-        "SELECT step_id, status, started_at, completed_at
+        "SELECT step_id, status, started_at, completed_at, updated_at
          FROM step_states WHERE workflow_id = ?1",
     )?;
     let step_rows = stmt.query_map(params![workflow_id], |row| {
@@ -98,17 +101,22 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
             row.get::<_, String>(1)?,
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
         ))
     })?;
 
     let mut tasks: HashMap<String, StepState> = HashMap::new();
     for row in step_rows {
-        let (step_id, status_str, started_str, completed_str) = row?;
+        let (step_id, status_str, started_str, completed_str, updated_str) = row?;
         let started_at_step = started_str
             .as_deref()
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&Utc));
         let completed_at_step = completed_str
+            .as_deref()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+        let updated_at_step = updated_str
             .as_deref()
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&Utc));
@@ -119,6 +127,7 @@ fn load_state_from_db(conn: &Connection, workflow_id: &str) -> Result<WorkflowSt
                 status: str_to_status(&status_str),
                 started_at: started_at_step,
                 completed_at: completed_at_step,
+                updated_at: updated_at_step,
                 action_reports: vec![],
             },
         );
@@ -171,7 +180,7 @@ pub fn load_state(cwd: &Path) -> Result<Option<WorkflowState>> {
 
     let mut stmt = conn.prepare(
         "SELECT workflow_id FROM workflow_runs
-         WHERE cwd = ?1 AND status IN ('active', 'awaiting_approval')",
+         WHERE cwd = ?1 AND status IN ('active', 'awaiting_approval', 'paused')",
     )?;
     let ids: Vec<String> = stmt
         .query_map(params![cwd_str], |row| row.get(0))?
@@ -194,7 +203,7 @@ pub fn load_state_by_id(cwd: &Path, workflow_id: &str) -> Result<Option<Workflow
     let exists: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM workflow_runs
-             WHERE workflow_id = ?1 AND status IN ('active', 'awaiting_approval')",
+             WHERE workflow_id = ?1 AND status IN ('active', 'awaiting_approval', 'paused')",
             params![workflow_id],
             |row| row.get::<_, i64>(0),
         )
@@ -235,14 +244,15 @@ pub fn save_state(cwd: &Path, state: &WorkflowState) -> Result<()> {
     for (task_id, task) in &state.tasks {
         tx.execute(
             "INSERT OR REPLACE INTO step_states
-             (workflow_id, step_id, status, started_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (workflow_id, step_id, status, started_at, completed_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 state.workflow_id,
                 task_id,
                 status_to_str(&task.status),
                 task.started_at.map(|dt| dt.to_rfc3339()),
                 task.completed_at.map(|dt| dt.to_rfc3339()),
+                task.updated_at.map(|dt| dt.to_rfc3339()),
             ],
         )?;
     }
@@ -305,6 +315,33 @@ pub fn clear_state_by_id(cwd: &Path, workflow_id: &str) -> Result<()> {
         "UPDATE workflow_runs SET status = 'completed', completed_at = ?1
          WHERE workflow_id = ?2",
         params![Utc::now().to_rfc3339(), workflow_id],
+    )?;
+    Ok(())
+}
+
+/// Sets a task's status to in_progress and records started_at / updated_at.
+/// Called by the run process when dispatching a task via webhook.
+/// Uses COALESCE so that re-dispatching does not reset started_at.
+pub fn mark_task_dispatched(cwd: &Path, workflow_id: &str, task_id: &str) -> Result<()> {
+    let conn = open_db(cwd)?;
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE step_states
+         SET status = 'in_progress', started_at = COALESCE(started_at, ?1), updated_at = ?1
+         WHERE workflow_id = ?2 AND step_id = ?3",
+        params![now, workflow_id, task_id],
+    )?;
+    Ok(())
+}
+
+/// Updates the updated_at timestamp of a single step.
+/// Used by report and pause handlers to record activity without changing status.
+pub fn update_task_timestamp(cwd: &Path, workflow_id: &str, task_id: &str) -> Result<()> {
+    let conn = open_db(cwd)?;
+    conn.execute(
+        "UPDATE step_states SET updated_at = ?1
+         WHERE workflow_id = ?2 AND step_id = ?3",
+        params![Utc::now().to_rfc3339(), workflow_id, task_id],
     )?;
     Ok(())
 }

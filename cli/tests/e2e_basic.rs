@@ -65,8 +65,8 @@ fn report_transitions_to_in_progress() {
     let proj = TempProject::new(CONFIG_STANDARD);
     proj.start("bug-fix");
 
-    let body = minimal_report("reproduce");
-    let out = proj.report(&body);
+    let body = minimal_report();
+    let out = proj.report("reproduce", &body);
 
     assert_eq!(out["ok"], true);
     assert_eq!(out["task_id"], "reproduce");

@@ -200,8 +200,8 @@ fn report_to_sub_agent_transitions_parent_to_in_progress() {
     assert_eq!(qc_before["status"], "pending");
 
     // Report for one sub-agent.
-    let body = minimal_report("quality-check/run-test");
-    let out = proj.report(&body);
+    let body = minimal_report();
+    let out = proj.report("quality-check/run-test", &body);
     assert_eq!(out["ok"], true);
     assert_eq!(out["task_id"], "quality-check/run-test");
 

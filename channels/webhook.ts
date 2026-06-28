@@ -44,19 +44,35 @@ When a task instruction arrives, the channel body is a JSON object:
 1. Parse the JSON from the channel body.
 2. Read \`prompt\` and carry out the requested work (edit files, run tests, etc.).
 3. Respect \`outputs\` (only modify matching paths) and \`deny\` (never touch listed files/commands).
-4. When the work is fully complete, report back:
+4. When the work is fully complete, call /complete with a brief summary:
 
 \`\`\`bash
-curl -sX POST {callback_url}/complete/{task_id}
+curl -sX POST {callback_url}/complete/{task_id} \\
+  -H 'Content-Type: application/json' \\
+  -d '{"summary":"implemented X, all tests passed"}'
 \`\`\`
 
-5. Optionally, report progress mid-task:
+5. Optionally report progress mid-task with a brief summary:
 
 \`\`\`bash
 curl -sX POST {callback_url}/report/{task_id} \\
   -H 'Content-Type: application/json' \\
-  -d '{"session_id":"","task_id":"{task_id}","action_index":0,"action_type":"bash","exit_code":0,"stdout":"…"}'
+  -d '{"summary":"ran tests, 12 passed"}'
 \`\`\`
+
+Send /report when you finish a significant step (e.g. tests pass, a phase of work completes).
+Do NOT use /report to signal start or end of the task — use /complete for the latter.
+
+6. If you must pause to ask the user a question before continuing, notify the orchestrator:
+
+\`\`\`bash
+curl -sX POST {callback_url}/pause/{task_id} \\
+  -H 'Content-Type: application/json' \\
+  -d '{"reason":"need clarification on which file to modify"}'
+\`\`\`
+
+Only call /pause when you genuinely cannot proceed without human input.
+After the user answers in your session, call /complete when the task is done.
 
 Do NOT call /complete until all work for that task is truly done.`,
 	},
