@@ -2,7 +2,6 @@
 set -euo pipefail
 
 REPO="Cyberdog-AI-Lab/aidd-workflow"
-BINARY="workflow-runner"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 
 # Detect OS and architecture
@@ -41,25 +40,32 @@ if [ -z "${VERSION:-}" ]; then
   fi
 fi
 
-ARCHIVE="${BINARY}-${TARGET}.tar.gz"
-URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
-
-echo "Installing ${BINARY} ${VERSION} for ${TARGET}..."
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
-if command -v curl &>/dev/null; then
-  curl -fsSL "${URL}" -o "${TMP}/${ARCHIVE}"
-else
-  wget -qO "${TMP}/${ARCHIVE}" "${URL}"
-fi
+install_binary() {
+  local binary="$1"
+  local archive="${binary}-${TARGET}.tar.gz"
+  local url="https://github.com/${REPO}/releases/download/${VERSION}/${archive}"
 
-tar -xzf "${TMP}/${ARCHIVE}" -C "${TMP}"
-mkdir -p "${INSTALL_DIR}"
-mv "${TMP}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
-chmod +x "${INSTALL_DIR}/${BINARY}"
+  echo "Installing ${binary} ${VERSION} for ${TARGET}..."
 
-echo "Installed ${INSTALL_DIR}/${BINARY}"
+  if command -v curl &>/dev/null; then
+    curl -fsSL "${url}" -o "${TMP}/${archive}"
+  else
+    wget -qO "${TMP}/${archive}" "${url}"
+  fi
+
+  tar -xzf "${TMP}/${archive}" -C "${TMP}"
+  mkdir -p "${INSTALL_DIR}"
+  mv "${TMP}/${binary}" "${INSTALL_DIR}/${binary}"
+  chmod +x "${INSTALL_DIR}/${binary}"
+
+  echo "Installed ${INSTALL_DIR}/${binary}"
+}
+
+install_binary "workflow-runner"
+install_binary "webhook-mcp"
 
 # Add INSTALL_DIR to PATH via shell rc file if not already present
 if ! echo "${PATH}" | tr ':' '\n' | grep -qx "${INSTALL_DIR}"; then
@@ -74,8 +80,8 @@ if ! echo "${PATH}" | tr ':' '\n' | grep -qx "${INSTALL_DIR}"; then
   if [ -f "${RC_FILE}" ] && grep -qF "${PATH_LINE}" "${RC_FILE}"; then
     echo "${INSTALL_DIR} is already configured in ${RC_FILE}"
   else
-    printf '\n# Added by %s installer\n%s\n' "${BINARY}" "${PATH_LINE}" >> "${RC_FILE}"
+    printf '\n# Added by aidd-workflow installer\n%s\n' "${PATH_LINE}" >> "${RC_FILE}"
     echo "Added ${INSTALL_DIR} to PATH in ${RC_FILE}"
-    echo "Run 'source ${RC_FILE}' or restart your shell to use ${BINARY}"
+    echo "Run 'source ${RC_FILE}' or restart your shell to use the installed binaries"
   fi
 fi

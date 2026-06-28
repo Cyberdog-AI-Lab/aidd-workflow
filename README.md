@@ -46,10 +46,38 @@ curl -fsSL https://raw.githubusercontent.com/Cyberdog-AI-Lab/aidd-workflow/main/
 VERSION=v0.0.1 bash <(curl -fsSL https://raw.githubusercontent.com/Cyberdog-AI-Lab/aidd-workflow/main/install.sh)
 ```
 
-### 2. ビルド（ソースから）
+### 2. Webhook MCP サーバーを Claude Code に登録
+
+インストール後、`webhook-mcp` を Claude Code の MCP サーバーとして登録する：
 
 ```bash
-cargo build
+claude mcp add webhook -- "${HOME}/.local/bin/webhook-mcp"
+```
+
+登録後は Claude Code セッション内から HTTP POST で Claude にイベントを送れる：
+
+```bash
+curl -X POST http://127.0.0.1:8788/ \
+  -H "Content-Type: application/json" \
+  -d '{"event": "build_failed", "message": "CI が失敗しました"}'
+```
+
+Claude はイベントを `<channel source="webhook" ...>` タグとして受信し、自律的に反応する。
+
+> **ポート変更**: デフォルトは `8788`。変更する場合は `--port <PORT>` を MCP サーバーの引数に追加する。
+>
+> ```bash
+> claude mcp add webhook -- "${HOME}/.local/bin/webhook-mcp" --port 9000
+> ```
+
+### 3. ビルド（ソースから）
+
+```bash
+# CLI (workflow-runner)
+cargo build --manifest-path cli/Cargo.toml
+
+# Webhook MCP サーバー
+cd channels && bun install && bun run build
 ```
 
 ### 3. config.yml を編集
@@ -183,16 +211,21 @@ workflows:
 ```
 install.sh                       バイナリインストールスクリプト（macOS/Linux）
 
-src/                             # workflow-runner（Rust）
-├── main.rs                      CLI エントリポイント
-├── config/                      YAML パース・型定義・imports 解決
-├── engine/                      DAG 評価・SQLite 状態管理・gate チェック
-├── adapters/
-│   └── hooks/                   Claude Code フック処理（providers 経由）
-├── providers/
-│   └── claude_code/             Claude Code hook JSON → 型安全な構造体
-├── infra/                       settings.json 生成
-└── protocol/                    JSON 入出力型・テーブルフォーマッター
+cli/                             # workflow-runner（Rust）
+├── Cargo.toml
+└── src/
+    ├── main.rs                  CLI エントリポイント
+    ├── config/                  YAML パース・型定義・imports 解決
+    ├── engine/                  DAG 評価・SQLite 状態管理・gate チェック
+    ├── adapters/
+    │   └── hooks/               Claude Code フック処理（providers 経由）
+    ├── providers/
+    │   └── claude_code/         Claude Code hook JSON → 型安全な構造体
+    ├── infra/                   settings.json 生成
+    └── protocol/                JSON 入出力型・テーブルフォーマッター
+
+channels/                        # Webhook MCP サーバー（TypeScript / Bun）
+└── webhook.ts                   HTTP POST → Claude Code channel 転送サーバー
 
 .github/workflows/
 └── release.yml                  GitHub Actions リリースパイプライン（4ターゲット）
@@ -216,6 +249,7 @@ src/                             # workflow-runner（Rust）
 ## 依存
 
 - Rust（`cargo build` でバイナリをビルド）
+- Bun（`bun build` で webhook-mcp をビルド）
 
 ## ドキュメント
 

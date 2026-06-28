@@ -21,15 +21,19 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
+            bun_target: bun-linux-x64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
+            bun_target: bun-linux-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
             use_cross: false
+            bun_target: bun-darwin-x64
           - target: aarch64-apple-darwin
             os: macos-latest
             use_cross: false
+            bun_target: bun-darwin-arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -54,16 +58,36 @@ jobs:
         if: ${{ !matrix.use_cross }}
         run: cargo build --release --target ${{ matrix.target }} --manifest-path cli/Cargo.toml
 
-      - name: Package archive
+      - name: Package CLI archive
         shell: bash
         run: |
           BINARY="cli/target/${{ matrix.target }}/release/workflow-runner"
           ARCHIVE="workflow-runner-${{ matrix.target }}.tar.gz"
           tar czf "${ARCHIVE}" -C "$(dirname "${BINARY}")" "$(basename "${BINARY}")"
-          echo "ARCHIVE=${ARCHIVE}" >> "${GITHUB_ENV}"
+          echo "CLI_ARCHIVE=${ARCHIVE}" >> "${GITHUB_ENV}"
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies (channels)
+        run: bun install --frozen-lockfile
+        working-directory: channels
+
+      - name: Build webhook MCP server
+        run: bun build --compile --target=${{ matrix.bun_target }} webhook.ts --outfile webhook-mcp
+        working-directory: channels
+
+      - name: Package webhook archive
+        shell: bash
+        run: |
+          BINARY="channels/webhook-mcp"
+          ARCHIVE="webhook-mcp-${{ matrix.target }}.tar.gz"
+          tar czf "${ARCHIVE}" -C "$(dirname "${BINARY}")" "$(basename "${BINARY}")"
+          echo "WEBHOOK_ARCHIVE=${ARCHIVE}" >> "${GITHUB_ENV}"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ARCHIVE }}
+          files: |
+            ${{ env.CLI_ARCHIVE }}
+            ${{ env.WEBHOOK_ARCHIVE }}
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
