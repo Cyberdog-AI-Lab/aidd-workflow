@@ -29,8 +29,8 @@
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                     AI ツール層                           │
-│   Claude Code Skill          (将来) Cursor / Generic      │
-│   SKILL.md が薄いブリッジ    アダプター追加で対応         │
+│   Claude Code（Channels ワーカー）   (将来) Cursor / Generic │
+│   webhook.ts の instructions で動作定義  アダプター追加で対応 │
 └─────────────┬────────────────────────────────────────────┘
               │  CLI 呼び出し（JSON 入出力）
 ┌─────────────▼────────────────────────────────────────────┐
@@ -67,6 +67,9 @@ main.rs
 ```
 aidd-workflow/
 ├── install.sh                           バイナリインストールスクリプト（macOS/Linux）
+├── channels/
+│   └── webhook.ts                       HTTP → Claude Code channel 転送 MCP サーバー
+│                                        instructions フィールドでワーカー動作を定義
 ├── src/
 │   ├── main.rs                          CLI エントリポイント（clap）
 │   ├── config/
@@ -96,9 +99,8 @@ aidd-workflow/
 └── .claude/
     ├── agents/                          カスタムエージェント定義（agents: フィールドで参照）
     │   └── <name>.md
-    ├── hooks/
-    │   └── post-edit-rust-checks.sh     .rs 編集後に fmt / lint / test を自動実行
-    └── skills/workflow-runner/          workflow-runner を呼ぶ薄いブリッジ
+    └── hooks/
+        └── post-edit-rust-checks.sh     .rs 編集後に fmt / lint / test を自動実行
 ```
 
 ---
@@ -259,26 +261,24 @@ workflow-runner --workflow-id 4fd261ba-... complete reproduce
 workflow-runner next
 ```
 
-### スキルとの通信フロー
+### Channels ワーカー通信フロー
 
 ```
-SKILL.md（Claude Code）                workflow-runner
-        │                                      │
-        │── start bug-fix ────────────────────▶│ workflow.db 作成
-        │◀── { workflow_id, status:"started", tasks:[...] }
-        │                                      │
-        │── [tasks を dispatch] ───────────────│
-        │                                      │
-        │── report ───────────────────────────▶│ workflow.db 更新
-        │◀── { ok: true } ────────────────────│
-        │                                      │
-        │── complete implement ───────────────▶│ gate チェック
-        │◀── { allowed: true,                 │ workflow.db 更新
-        │      next: { status: "awaiting_approval" } }
-        │                                      │
-        │  [ユーザーに承認確認]                 │
-        │── next ─────────────────────────────▶│ 承認 → active に戻す
-        │◀── { status:"in_progress", tasks:[...] }
+workflow-runner run <workflow>          channels/webhook.ts       Claude Code セッション
+（オーケストレーター :8789）               （MCP サーバー :8788）    （ワーカー、常時待機）
+        │                                       │                        │
+        │── POST :8788 {task_id, prompt, …} ──▶│                        │
+        │                                       │── <channel> event ────▶│
+        │                                       │                        │ prompt に従って実行
+        │◀── POST :8789/complete/{task_id} ─────────────────────────────│
+        │ complete() → build_next()             │                        │
+        │── POST :8788 {next_task, …} ─────────▶│                       │
+        │   …（ループ）                          │                        │
+        │                                       │                        │
+        │  ※ approval: true タスク完了時         │                        │
+        │    → status = awaiting_approval       │                        │
+        │    → POST :8789/next で承認           │                        │
+        │    → POST :8789/reject/:id で却下     │                        │
 ```
 
 ### `run` コマンドの通信フロー（自律実行モード）
@@ -432,10 +432,10 @@ workflow_runs.status = 'awaiting_approval'
         ↓
 { next: { status: "awaiting_approval", tasks: [] } }
         ↓
-SKILL.md がユーザーに確認
+awaiting_approval: 外部から HTTP コールバックで承認・却下を受け付ける
 
-    承認 → next         → status = 'active' → 次タスクを返す
-    却下 → reject <id>  → status = 'active' → タスクを InProgress に戻して再 dispatch
+    承認 → POST :8789/next        → status = 'active' → 次タスクを dispatch
+    却下 → POST :8789/reject/:id  → status = 'active' → タスクを InProgress に戻して再 dispatch
 ```
 
 ---
@@ -445,12 +445,12 @@ SKILL.md がユーザーに確認
 ```
 build_next が { task_id: "quality-check", agents: ["run-test", "run-lint"] } を返す
         ↓
-SKILL.md が run-test / run-lint を並列起動
+workflow-runner run が run-test / run-lint タスクを Channels 経由で dispatch
         ↓
-run-test 完了 → complete quality-check/run-test → gate パス（サブは常に通過）
-run-lint 完了 → complete quality-check/run-lint → gate パス
+run-test 完了 → POST :8789/complete/quality-check/run-test → gate パス（サブは常に通過）
+run-lint 完了 → POST :8789/complete/quality-check/run-lint → gate パス
         ↓
-complete quality-check
+POST :8789/complete/quality-check
         ↓
 gate::check:
   - requires [implement] → Completed? ✅
