@@ -1,4 +1,5 @@
 mod adapters;
+mod cmd;
 mod config;
 mod engine;
 mod infra;
@@ -47,6 +48,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run a workflow end-to-end as a daemon (dispatches tasks via Channels webhook, awaits HTTP callbacks).
+    Run { workflow: String },
     /// Start a workflow and return the first set of tasks.
     Start { workflow: String },
     /// Return the next set of tasks. When awaiting approval, calling this approves and proceeds.
@@ -114,6 +117,11 @@ fn main() {
 
 fn run(cmd: Commands, cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
     match cmd {
+        Commands::Run { workflow } => {
+            let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+            rt.block_on(cmd::run::run_workflow(cwd.to_path_buf(), workflow))?;
+            Ok(String::new())
+        }
         Commands::Start { workflow } => cmd_start(cwd, &workflow),
         Commands::Next => cmd_next(cwd, workflow_id),
         Commands::Report => cmd_report(cwd, workflow_id),

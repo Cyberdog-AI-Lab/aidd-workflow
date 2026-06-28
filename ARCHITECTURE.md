@@ -216,6 +216,9 @@ workflows:
 ```
 workflow-runner [--workflow-id <id>] [--cwd <path>] <command>
 
+run <workflow>                  自律実行モード（常駐デーモン）
+                               Channels webhook 経由でタスクを Claude Code に push し、
+                               HTTP コールバック（:8789）で完了を受け取りループする
 start <workflow>               ワークフロー開始 → 最初の tasks を JSON で返す
                                出力の workflow_id を以降の --workflow-id に使用する
 next                           次の tasks を返す
@@ -276,6 +279,26 @@ SKILL.md（Claude Code）                workflow-runner
         │  [ユーザーに承認確認]                 │
         │── next ─────────────────────────────▶│ 承認 → active に戻す
         │◀── { status:"in_progress", tasks:[...] }
+```
+
+### `run` コマンドの通信フロー（自律実行モード）
+
+```
+workflow-runner run <workflow>          channels/webhook.ts       Claude Code セッション
+（オーケストレーター :8789）               （MCP サーバー :8788）    （ワーカー、常時待機）
+        │                                       │                        │
+        │── POST :8788 {task_id, prompt, …} ──▶│                        │
+        │                                       │── <channel> event ────▶│
+        │                                       │                        │ タスク実行
+        │◀── POST :8789/complete/{task_id} ─────────────────────────────│
+        │ complete() → build_next()             │                        │
+        │── POST :8788 {next_task, …} ─────────▶│                       │
+        │   …（ループ）                          │                        │
+        │                                       │                        │
+        │  ※ approval: true タスク完了時         │                        │
+        │    → status = awaiting_approval       │                        │
+        │    → POST :8789/next で承認           │                        │
+        │    → POST :8789/reject/:id で却下     │                        │
 ```
 
 ### Hook イベントの stdin JSON
