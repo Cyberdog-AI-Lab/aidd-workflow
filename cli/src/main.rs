@@ -49,7 +49,22 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run a workflow end-to-end as a daemon (dispatches tasks via Channels webhook, awaits HTTP callbacks).
-    Run { workflow: String },
+    Run {
+        workflow: String,
+        /// Port for the local callback HTTP server (conflicts with --callback-url) [default: 8789].
+        #[arg(long, conflicts_with = "callback_url")]
+        callback_port: Option<u16>,
+        /// Full callback URL sent to Claude Code, e.g. an ngrok tunnel (conflicts with --callback-port).
+        /// The local server always binds on the port from --callback-port (default 8789).
+        #[arg(long, conflicts_with = "callback_port")]
+        callback_url: Option<String>,
+        /// Port of the Channels webhook server (conflicts with --webhook-url) [default: 8788].
+        #[arg(long, conflicts_with = "webhook_url")]
+        webhook_port: Option<u16>,
+        /// Full URL of the Channels webhook server (conflicts with --webhook-port).
+        #[arg(long, conflicts_with = "webhook_port")]
+        webhook_url: Option<String>,
+    },
     /// Start a workflow and return the first set of tasks.
     Start { workflow: String },
     /// Return the next set of tasks. When awaiting approval, calling this approves and proceeds.
@@ -117,9 +132,25 @@ fn main() {
 
 fn run(cmd: Commands, cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
     match cmd {
-        Commands::Run { workflow } => {
+        Commands::Run {
+            workflow,
+            callback_port,
+            callback_url,
+            webhook_port,
+            webhook_url,
+        } => {
+            let cb_port = callback_port.unwrap_or(8789);
+            let cb_url = callback_url.unwrap_or_else(|| format!("http://127.0.0.1:{}", cb_port));
+            let wh_port = webhook_port.unwrap_or(8788);
+            let wh_url = webhook_url.unwrap_or_else(|| format!("http://127.0.0.1:{}", wh_port));
             let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-            rt.block_on(cmd::run::run_workflow(cwd.to_path_buf(), workflow))?;
+            rt.block_on(cmd::run::run_workflow(
+                cwd.to_path_buf(),
+                workflow,
+                cb_port,
+                cb_url,
+                wh_url,
+            ))?;
             Ok(String::new())
         }
         Commands::Start { workflow } => cmd_start(cwd, &workflow),

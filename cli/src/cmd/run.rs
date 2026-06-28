@@ -19,9 +19,6 @@ use crate::engine::{dag, executor, gate, store};
 use crate::protocol::input::ReportInput;
 use crate::protocol::output::{FlowStatus, TaskOutput};
 
-const CALLBACK_PORT: u16 = 8789;
-const WEBHOOK_URL: &str = "http://127.0.0.1:8788";
-
 enum RunEvent {
     Complete {
         task_id: String,
@@ -84,7 +81,13 @@ async fn handle_reject(
     "ok"
 }
 
-pub async fn run_workflow(cwd: PathBuf, workflow_name: String) -> Result<()> {
+pub async fn run_workflow(
+    cwd: PathBuf,
+    workflow_name: String,
+    callback_port: u16,
+    callback_url: String,
+    webhook_url: String,
+) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<RunEvent>(32);
 
     let app_state = Arc::new(AppState { tx });
@@ -95,12 +98,12 @@ pub async fn run_workflow(cwd: PathBuf, workflow_name: String) -> Result<()> {
         .route("/reject/:task_id", post(handle_reject))
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", CALLBACK_PORT))
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", callback_port))
         .await
         .context("failed to bind callback server")?;
     eprintln!(
         "[run] callback server listening on 127.0.0.1:{}",
-        CALLBACK_PORT
+        callback_port
     );
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -121,11 +124,17 @@ pub async fn run_workflow(cwd: PathBuf, workflow_name: String) -> Result<()> {
         workflow_name, workflow_id
     );
 
-    let callback_url = format!("http://127.0.0.1:{}", CALLBACK_PORT);
     let mut dispatched: HashSet<String> = HashSet::new();
 
     let initial = executor::build_next(&wf, &state, &config);
-    dispatch_tasks(&initial.tasks, &callback_url, &workflow_id, &mut dispatched).await?;
+    dispatch_tasks(
+        &initial.tasks,
+        &callback_url,
+        &webhook_url,
+        &workflow_id,
+        &mut dispatched,
+    )
+    .await?;
 
     loop {
         match rx.recv().await {
@@ -145,7 +154,14 @@ pub async fn run_workflow(cwd: PathBuf, workflow_name: String) -> Result<()> {
 
                 // Workflow finished or awaiting approval when next_tasks is None
                 if let Some(tasks) = next_tasks {
-                    dispatch_tasks(&tasks, &callback_url, &workflow_id, &mut dispatched).await?;
+                    dispatch_tasks(
+                        &tasks,
+                        &callback_url,
+                        &webhook_url,
+                        &workflow_id,
+                        &mut dispatched,
+                    )
+                    .await?;
                 }
 
                 // Check if the workflow record was cleared (completed) or paused
@@ -190,7 +206,14 @@ pub async fn run_workflow(cwd: PathBuf, workflow_name: String) -> Result<()> {
                     );
                     break;
                 }
-                dispatch_tasks(&next.tasks, &callback_url, &workflow_id, &mut dispatched).await?;
+                dispatch_tasks(
+                    &next.tasks,
+                    &callback_url,
+                    &webhook_url,
+                    &workflow_id,
+                    &mut dispatched,
+                )
+                .await?;
             }
 
             Some(RunEvent::Reject { task_id, reason }) => {
@@ -224,7 +247,14 @@ pub async fn run_workflow(cwd: PathBuf, workflow_name: String) -> Result<()> {
                 let task_output = build_task_output(&task_id, &wf, &config);
                 if let Some(t) = task_output {
                     dispatched.remove(&task_id);
-                    dispatch_tasks(&[t], &callback_url, &workflow_id, &mut dispatched).await?;
+                    dispatch_tasks(
+                        &[t],
+                        &callback_url,
+                        &webhook_url,
+                        &workflow_id,
+                        &mut dispatched,
+                    )
+                    .await?;
                 }
             }
         }
@@ -336,6 +366,7 @@ fn build_task_output(task_id: &str, wf: &Workflow, config: &Config) -> Option<Ta
 async fn dispatch_tasks(
     tasks: &[TaskOutput],
     callback_url: &str,
+    webhook_url: &str,
     workflow_id: &str,
     dispatched: &mut HashSet<String>,
 ) -> Result<()> {
@@ -355,7 +386,7 @@ async fn dispatch_tasks(
         });
         eprintln!("[run] dispatching task '{}' to webhook", task.task_id);
         client
-            .post(WEBHOOK_URL)
+            .post(webhook_url)
             .json(&payload)
             .send()
             .await
@@ -363,7 +394,7 @@ async fn dispatch_tasks(
                 format!(
                     "failed to POST task '{}' to channels webhook ({}); \
                      is channels/webhook.ts running?",
-                    task.task_id, WEBHOOK_URL
+                    task.task_id, webhook_url
                 )
             })?;
         dispatched.insert(task.task_id.clone());

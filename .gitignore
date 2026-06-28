@@ -12,6 +12,7 @@ tmp/
 .DS_Store
 
 # Rust
+/target/
 /cli/target/
 
 # Bun
