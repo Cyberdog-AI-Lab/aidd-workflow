@@ -416,14 +416,18 @@ pub fn minimal_report(task_id: &str) -> serde_json::Value {
 
 // ── run subcommand helpers ────────────────────────────────────────────────────
 
-/// Allocates a free TCP port by binding to 127.0.0.1:0 and immediately
-/// releasing it.  Used by `run` tests to avoid default-port conflicts when
-/// multiple tests execute in parallel.
+/// Allocates a free TCP port using a global atomic counter.
+///
+/// Starts from a high base (40000+) and increments monotonically so that
+/// parallel tests each receive a unique port without TOCTOU races.  The OS
+/// will refuse a bind at process startup if the port happens to be in use
+/// (extremely unlikely in the ephemeral range 40000-49999), but the
+/// monotonic increment eliminates the common case where two tests race on the
+/// same port after both call bind(:0) and release before the child binds.
 pub fn pick_free_port() -> u16 {
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").expect("pick_free_port: failed to bind :0");
-    listener.local_addr().unwrap().port()
-    // listener is dropped here, releasing the port
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(40000);
+    NEXT_PORT.fetch_add(1, Ordering::Relaxed)
 }
 
 // ── MockWebhook ───────────────────────────────────────────────────────────────

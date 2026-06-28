@@ -180,7 +180,7 @@ SKILL.md は廃止し、Claude Code の動作は MCP サーバーの `instructio
     │
     └──▶ v0.0.2: 自律駆動型ワークフロー
     │         │
-    │         ├──▶ Item 1: workflow-runner 常駐オーケストレーターモード   🔲 未着手
+    │         ├──▶ Item 1: workflow-runner 常駐オーケストレーターモード   ✅ 完了
     │         │
     │         ├──▶ Item 2: Channels 統合 & Claude Code ワーカー設定      ✅ 完了
     │         │         （Item 1 と並行して着手可能）
