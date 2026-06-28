@@ -48,16 +48,16 @@ jobs:
 
       - name: Build (cross)
         if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} --manifest-path cli/Cargo.toml
 
       - name: Build (cargo)
         if: ${{ !matrix.use_cross }}
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path cli/Cargo.toml
 
       - name: Package archive
         shell: bash
         run: |
-          BINARY="target/${{ matrix.target }}/release/workflow-runner"
+          BINARY="cli/target/${{ matrix.target }}/release/workflow-runner"
           ARCHIVE="workflow-runner-${{ matrix.target }}.tar.gz"
           tar czf "${ARCHIVE}" -C "$(dirname "${BINARY}")" "$(basename "${BINARY}")"
           echo "ARCHIVE=${ARCHIVE}" >> "${GITHUB_ENV}"

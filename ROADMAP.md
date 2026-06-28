@@ -9,108 +9,9 @@ aidd-workflow の中長期ロードマップ。
 | フェーズ | 状態 |
 |---------|------|
 | v0.0.1　コア実装 | ✅ 完了 |
-| v0.0.2　ワークフローの視覚化（ダッシュボード作成） | 🔲 未着手 |
-| v0.0.3　自律駆動型ワークフロー | 🔲 未着手 |
+| v0.0.2　自律駆動型ワークフロー | 🔲 未着手 |
+| v0.0.3　ワークフローの視覚化（ダッシュボード作成） | 🔲 未着手 |
 
----
-
-## v0.0.2: ワークフローの視覚化（ダッシュボード作成）
-
-### 目標
-
-ローカル Web ダッシュボードを通じて、ワークフローの実行状況・履歴・承認待ちタスク・実行ログを視覚的に把握できるようにする。
-
-### 背景・動機
-
-現在の状況確認は `workflow-runner status` のテーブル出力に限られ、DAG 構造や実行履歴、承認待ちの全体像を俯瞰しにくい。
-ブラウザベースのダッシュボードにより以下が実現する：
-
-- DAG の進行状況をリアルタイムに可視化
-- 実行履歴・所要時間の傾向を把握
-- 承認待ちタスクをまとめて確認し、その場で承認/却下
-- アクションレポート（コマンド実行結果・AI 出力）を詳細に確認
-
-### アーキテクチャ概要
-
-```
-ブラウザ（React UI: DAG ビュー／タイムライン／承認キュー／ログビューア）
-        │
-        │  HTTP（REST API + SSE でライブ更新）
-        ▼
-┌──────────────────────────────────────┐
-│  workflow-runner dashboard サーバー     │
-│  （axum + tokio、127.0.0.1 のみバインド） │
-│                                        │
-│  GET  /api/workflows[/:id]             │
-│  GET  /api/workflows/:id/timeline      │
-│  GET  /api/workflows/:id/logs          │
-│  POST /api/workflows/:id/approve       │
-│  POST /api/workflows/:id/reject        │
-│  GET  /api/events （SSE）               │
-└──────────────┬─────────────────────────┘
-               │  既存 engine / store 層をそのまま呼び出す（新規永続化層は作らない）
-               ▼
-        .workflow/workflow.db（SQLite、現在の cwd のみを対象）
-```
-
-### ディレクトリ構成
-
-CLI ソースとフロントエンドを明確に分離する：
-
-```
-src/dashboard/        # axum ベースの HTTP サーバー + API 層（Rust）
-dashboard-ui/         # React + Vite のフロントエンド（独立した npm プロジェクト）
-  ├── package.json
-  ├── src/
-  └── dist/           # ビルド成果物（配布方法は実装時に検討）
-```
-
-### 実装方針
-
-1. `workflow-runner dashboard` で HTTP サーバーを起動する（127.0.0.1 のみバインド、認証なし — ローカル開発ツールとして既存 CLI と同等の権限前提）
-2. 既存の `engine` / `store` 層をそのまま呼び出し、新規の永続化層は作らない
-3. 対象は単一プロジェクト（実行時の cwd 配下の `.workflow/workflow.db`）のみとする
-4. フロントエンドは React + Vite で実装し、`dashboard-ui/` として CLI ソース（`src/`）と分離する
-5. ビルド成果物の配布方法（`rust-embed` 等でバイナリへ埋め込むか、`dist/` を別途配置するか）は実装時に検討する
-
-### フェーズ分割
-
-#### 基盤 + リアルタイム進行状況
-
-- `workflow-runner dashboard` コマンドでサーバーを起動
-- DAG 上で各タスクの状態（pending/in_progress/completed/failed）を可視化
-- SSE（Server-Sent Events）でライブ更新
-
-#### 履歴・タイムライン
-
-- 過去の実行（`workflow_runs`）の一覧表示
-- 開始〜完了時刻、所要時間の推移をタイムライン/グラフで表示
-
-#### 承認キュー・アクション
-
-- `awaiting_approval` のタスクを一覧表示
-- ブラウザから承認（`workflow-runner next` 相当）/ 却下（`workflow-runner reject` 相当）を実行
-
-#### ログ詳細ビュー
-
-- `action_reports`（コマンド実行結果・AI 出力）の詳細表示
-
-### 使用ライブラリ候補
-
-| 種別 | 候補 | 用途 |
-|---|---|---|
-| Rust | `axum` / `tokio` | HTTP サーバー・非同期ランタイム |
-| Rust | `tower-http` | 静的アセット配信 |
-| Rust | `rust-embed`（検討） | フロントエンド成果物をバイナリへ埋め込み、単一バイナリ配布を維持 |
-| npm | `React` + `Vite` | フロントエンド UI |
-| npm | DAG 可視化ライブラリ（検討: `react-flow` 等） | DAG の描画 |
-
-### 完了基準
-
-- `workflow-runner dashboard` でローカル Web サーバーが起動し、ブラウザから DAG・履歴・承認待ち・ログを確認できる
-- 承認待ちタスクをブラウザから承認/却下できる
-- `cargo test`（Rust 側）が全て通過する
-- README.md / ARCHITECTURE.md が更新されている
 
 ---
 
@@ -330,3 +231,103 @@ Item 1 と Item 2 に依存関係はない。
 - [Claude Code – MCP サーバー設定](https://docs.anthropic.com/ja/docs/claude-code/mcp)
 - [Claude Code – Research Preview: Channels](https://docs.anthropic.com/ja/docs/claude-code/channels)（要確認）
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — 現在のアーキテクチャ詳細
+
+---
+
+## v0.0.2: ワークフローの視覚化（ダッシュボード作成）
+
+### 目標
+
+ローカル Web ダッシュボードを通じて、ワークフローの実行状況・履歴・承認待ちタスク・実行ログを視覚的に把握できるようにする。
+
+### 背景・動機
+
+現在の状況確認は `workflow-runner status` のテーブル出力に限られ、DAG 構造や実行履歴、承認待ちの全体像を俯瞰しにくい。
+ブラウザベースのダッシュボードにより以下が実現する：
+
+- DAG の進行状況をリアルタイムに可視化
+- 実行履歴・所要時間の傾向を把握
+- 承認待ちタスクをまとめて確認し、その場で承認/却下
+- アクションレポート（コマンド実行結果・AI 出力）を詳細に確認
+
+### アーキテクチャ概要
+
+```
+ブラウザ（React UI: DAG ビュー／タイムライン／承認キュー／ログビューア）
+        │
+        │  HTTP（REST API + SSE でライブ更新）
+        ▼
+┌──────────────────────────────────────┐
+│  workflow-runner dashboard サーバー     │
+│  （axum + tokio、127.0.0.1 のみバインド） │
+│                                        │
+│  GET  /api/workflows[/:id]             │
+│  GET  /api/workflows/:id/timeline      │
+│  GET  /api/workflows/:id/logs          │
+│  POST /api/workflows/:id/approve       │
+│  POST /api/workflows/:id/reject        │
+│  GET  /api/events （SSE）               │
+└──────────────┬─────────────────────────┘
+               │  既存 engine / store 層をそのまま呼び出す（新規永続化層は作らない）
+               ▼
+        .workflow/workflow.db（SQLite、現在の cwd のみを対象）
+```
+
+### ディレクトリ構成
+
+CLI ソースとフロントエンドを明確に分離する：
+
+```
+src/dashboard/        # axum ベースの HTTP サーバー + API 層（Rust）
+dashboard-ui/         # React + Vite のフロントエンド（独立した npm プロジェクト）
+  ├── package.json
+  ├── src/
+  └── dist/           # ビルド成果物（配布方法は実装時に検討）
+```
+
+### 実装方針
+
+1. `workflow-runner dashboard` で HTTP サーバーを起動する（127.0.0.1 のみバインド、認証なし — ローカル開発ツールとして既存 CLI と同等の権限前提）
+2. 既存の `engine` / `store` 層をそのまま呼び出し、新規の永続化層は作らない
+3. 対象は単一プロジェクト（実行時の cwd 配下の `.workflow/workflow.db`）のみとする
+4. フロントエンドは React + Vite で実装し、`dashboard-ui/` として CLI ソース（`src/`）と分離する
+5. ビルド成果物の配布方法（`rust-embed` 等でバイナリへ埋め込むか、`dist/` を別途配置するか）は実装時に検討する
+
+### フェーズ分割
+
+#### 基盤 + リアルタイム進行状況
+
+- `workflow-runner dashboard` コマンドでサーバーを起動
+- DAG 上で各タスクの状態（pending/in_progress/completed/failed）を可視化
+- SSE（Server-Sent Events）でライブ更新
+
+#### 履歴・タイムライン
+
+- 過去の実行（`workflow_runs`）の一覧表示
+- 開始〜完了時刻、所要時間の推移をタイムライン/グラフで表示
+
+#### 承認キュー・アクション
+
+- `awaiting_approval` のタスクを一覧表示
+- ブラウザから承認（`workflow-runner next` 相当）/ 却下（`workflow-runner reject` 相当）を実行
+
+#### ログ詳細ビュー
+
+- `action_reports`（コマンド実行結果・AI 出力）の詳細表示
+
+### 使用ライブラリ候補
+
+| 種別 | 候補 | 用途 |
+|---|---|---|
+| Rust | `axum` / `tokio` | HTTP サーバー・非同期ランタイム |
+| Rust | `tower-http` | 静的アセット配信 |
+| Rust | `rust-embed`（検討） | フロントエンド成果物をバイナリへ埋め込み、単一バイナリ配布を維持 |
+| npm | `React` + `Vite` | フロントエンド UI |
+| npm | DAG 可視化ライブラリ（検討: `react-flow` 等） | DAG の描画 |
+
+### 完了基準
+
+- `workflow-runner dashboard` でローカル Web サーバーが起動し、ブラウザから DAG・履歴・承認待ち・ログを確認できる
+- 承認待ちタスクをブラウザから承認/却下できる
+- `cargo test`（Rust 側）が全て通過する
+- README.md / ARCHITECTURE.md が更新されている
