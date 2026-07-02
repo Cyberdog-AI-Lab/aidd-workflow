@@ -14,12 +14,9 @@ pub struct WorkflowOutput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlowStatus {
-    Started,
     InProgress,
     Completed,
     Blocked,
-    /// Workflow is paused; call `next` to approve or `reject <task-id>` to retry.
-    AwaitingApproval,
 }
 
 /// Output for a single executable task returned to the skill layer.
@@ -40,24 +37,6 @@ pub struct TaskOutput {
     pub deny: Option<DenyRules>,
     /// Whether developer approval is required after this task completes.
     pub approval: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CompleteOutput {
-    pub task_id: String,
-    pub allowed: bool,
-    pub reason: Option<String>,
-    /// Next state when allowed = true.
-    pub next: Option<WorkflowOutput>,
-}
-
-/// Response to `reject <task-id>`: returns the task to retry.
-#[derive(Debug, Serialize)]
-pub struct RejectOutput {
-    pub task_id: String,
-    pub reason: Option<String>,
-    /// The task definition for re-dispatch.
-    pub task: Option<TaskOutput>,
 }
 
 #[derive(Debug, Serialize)]

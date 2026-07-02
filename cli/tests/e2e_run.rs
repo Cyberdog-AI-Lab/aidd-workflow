@@ -12,17 +12,22 @@
 //!   9-2  linear workflow runs to completion via /complete callbacks
 //!   9-3  tasks with `requires` are dispatched only after dependencies complete
 //!   9-4  approval task pauses dispatch after /complete
-//!   9-5  POST /next approves the paused task and resumes dispatch
+//!   9-5  POST /approve approves the awaiting-approval task and resumes dispatch
 //!   9-6  POST /reject/:id re-dispatches the rejected task
 //!   9-7  POST /reject/:id with JSON reason body is accepted
 //!   9-8  --callback-port changes the callback server bind port
 //!   9-9  --callback-url sets callback_url in the webhook payload
-//!   9-10 dispatch payload contains all required fields
+//!   9-10 dispatch payload contains all required fields (incl. agents/skills)
 //!   9-11 --webhook-port constructs the webhook URL from port number
 //!   9-12 --callback-port and --callback-url together → clap conflict error
 //!   9-13 --webhook-port and --webhook-url together → clap conflict error
 //!   9-14 unknown workflow name → exit 1 with informative error
 //!   9-15 webhook server unavailable → exit 1 with informative error
+//!   9-16 POST /complete for an unknown task_id is gated out, not a crash
+//!
+//! `/approve` and `/resume` are separate endpoints (split from a single
+//! `/next` endpoint that used to handle both awaiting_approval and paused
+//! workflows) — see `e2e_resume.rs` for the `/resume` + pause coverage.
 
 mod helpers;
 use helpers::{pick_free_port, MockWebhook, TempProject, CONFIG_MINIMAL};
@@ -170,10 +175,10 @@ fn run_approval_pauses_dispatch_after_complete() {
 
 // ── 9-5 ───────────────────────────────────────────────────────────────────────
 
-/// POST /next while in `awaiting_approval` must approve the task, dispatch the
-/// next task, and allow the workflow to reach completion.
+/// POST /approve while in `awaiting_approval` must approve the task, dispatch
+/// the next task, and allow the workflow to reach completion.
 #[test]
-fn run_next_approves_and_resumes_dispatch() {
+fn run_approve_approves_and_resumes_dispatch() {
     let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_APPROVAL_RUN);
     let cb_port = pick_free_port();
@@ -182,7 +187,7 @@ fn run_next_approves_and_resumes_dispatch() {
     webhook.wait_for_n(1, TIMEOUT);
     proc.complete("work");
 
-    // Wait for approval gate to be set before calling /next
+    // Wait for approval gate to be set before calling /approve
     std::thread::sleep(Duration::from_millis(100));
     proc.approve();
 
@@ -191,7 +196,7 @@ fn run_next_approves_and_resumes_dispatch() {
     assert_eq!(
         dispatched[1]["task_id"].as_str(),
         Some("finish"),
-        "finish must be dispatched after /next approves"
+        "finish must be dispatched after /approve"
     );
 
     // Complete the final task → workflow exits
@@ -352,6 +357,17 @@ fn run_dispatch_payload_contains_required_fields() {
         payload.get("deny").is_some(),
         "payload must include deny key"
     );
+    // agents/skills must be present so the worker knows whether to spawn
+    // parallel sub-agents or invoke named skills (empty arrays here since
+    // CONFIG_TWO_STEP's tasks use neither).
+    assert!(
+        payload.get("agents").is_some(),
+        "payload must include agents key"
+    );
+    assert!(
+        payload.get("skills").is_some(),
+        "payload must include skills key"
+    );
 }
 
 // ── 9-11 ──────────────────────────────────────────────────────────────────────
@@ -478,5 +494,40 @@ fn run_webhook_unavailable_exits_with_error() {
     assert!(
         stderr.contains("webhook"),
         "error must mention 'webhook': got '{stderr}'"
+    );
+}
+
+// ── 9-16 ──────────────────────────────────────────────────────────────────────
+
+/// POST /complete for a task_id that isn't defined in the workflow config
+/// must be gated out (logged, no dispatch) rather than crashing the daemon
+/// or otherwise disrupting it.
+#[test]
+fn run_complete_unknown_task_is_gated_not_a_crash() {
+    let webhook = MockWebhook::start();
+    let proj = TempProject::new(CONFIG_TWO_STEP);
+    let cb_port = pick_free_port();
+    let mut proc = proj.start_run("two-step", cb_port, &webhook.url());
+
+    webhook.wait_for_n(1, TIMEOUT); // step-a dispatched
+
+    proc.complete("ghost-task");
+
+    // The gate rejects it server-side: no new dispatch, daemon keeps running.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        webhook.count(),
+        1,
+        "an unknown task_id must not cause any dispatch"
+    );
+
+    // The daemon must still be alive and able to process the real next step.
+    proc.complete("step-a");
+    webhook.wait_for_n(2, TIMEOUT);
+    proc.complete("step-b");
+    let status = proc.wait_exit(TIMEOUT);
+    assert!(
+        status.success(),
+        "the daemon must still complete the workflow normally afterward"
     );
 }

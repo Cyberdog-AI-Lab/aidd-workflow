@@ -304,50 +304,43 @@ impl TempProject {
 
     // ── Workflow shortcut helpers ─────────────────────────────────────────────
 
-    /// `workflow-runner start <workflow>` → parsed JSON.
-    pub fn start(&self, workflow: &str) -> serde_json::Value {
-        self.assert_ok(&["start", workflow])
+    /// `workflow-runner approve --callback-port <port>` → parsed JSON.
+    /// Exercises the CLI wrapper itself (HTTP POST to a running `run` daemon),
+    /// as opposed to `RunningProcess::approve()` which POSTs directly.
+    pub fn approve_cli(&self, callback_port: u16) -> serde_json::Value {
+        self.assert_ok(&["approve", "--callback-port", &callback_port.to_string()])
     }
 
-    /// `workflow-runner next` → parsed JSON.
-    pub fn next(&self) -> serde_json::Value {
-        self.assert_ok(&["next"])
+    /// `workflow-runner resume --callback-port <port>` → parsed JSON.
+    pub fn resume_cli(&self, callback_port: u16) -> serde_json::Value {
+        self.assert_ok(&["resume", "--callback-port", &callback_port.to_string()])
     }
 
-    /// `workflow-runner --workflow-id <id> next` → parsed JSON.
-    pub fn next_with_id(&self, workflow_id: &str) -> serde_json::Value {
-        self.assert_ok(&["--workflow-id", workflow_id, "next"])
+    /// `workflow-runner reject <task_id> --callback-port <port>` → parsed JSON.
+    pub fn reject_cli(&self, task_id: &str, callback_port: u16) -> serde_json::Value {
+        self.assert_ok(&[
+            "reject",
+            task_id,
+            "--callback-port",
+            &callback_port.to_string(),
+        ])
     }
 
-    /// `workflow-runner complete <task_id>` → parsed JSON.
-    pub fn complete(&self, task_id: &str) -> serde_json::Value {
-        self.assert_ok(&["complete", task_id])
-    }
-
-    /// `workflow-runner --workflow-id <id> complete <task_id>` → parsed JSON.
-    pub fn complete_with_id(&self, workflow_id: &str, task_id: &str) -> serde_json::Value {
-        self.assert_ok(&["--workflow-id", workflow_id, "complete", task_id])
-    }
-
-    /// `workflow-runner report` with the given JSON body → parsed JSON.
-    pub fn report(&self, task_id: &str, body: &serde_json::Value) -> serde_json::Value {
-        let json = serde_json::to_string(body).expect("failed to serialize report body");
-        self.assert_ok_with_stdin(&["report", task_id], &json)
-    }
-
-    /// `workflow-runner reject <task_id>` → parsed JSON.
-    pub fn reject(&self, task_id: &str) -> serde_json::Value {
-        self.assert_ok(&["reject", task_id])
-    }
-
-    /// `workflow-runner reject <task_id> --reason <reason>` → parsed JSON.
-    pub fn reject_with_reason(&self, task_id: &str, reason: &str) -> serde_json::Value {
-        self.assert_ok(&["reject", task_id, "--reason", reason])
-    }
-
-    /// `workflow-runner resume` → parsed JSON.
-    pub fn resume(&self) -> serde_json::Value {
-        self.assert_ok(&["resume"])
+    /// `workflow-runner reject <task_id> --reason <reason> --callback-port <port>` → parsed JSON.
+    pub fn reject_cli_with_reason(
+        &self,
+        task_id: &str,
+        callback_port: u16,
+        reason: &str,
+    ) -> serde_json::Value {
+        self.assert_ok(&[
+            "reject",
+            task_id,
+            "--reason",
+            reason,
+            "--callback-port",
+            &callback_port.to_string(),
+        ])
     }
 
     /// `workflow-runner status` → parsed JSON.
@@ -405,6 +398,27 @@ pub fn hook_bash_json(project_root: &Path, command: &str) -> String {
 /// so a fixed placeholder value is used.
 pub fn minimal_report() -> serde_json::Value {
     serde_json::json!({ "summary": null })
+}
+
+// ── synchronization helpers ───────────────────────────────────────────────────
+
+/// Poll `predicate` every 50ms until it returns true, or panic after `timeout`.
+///
+/// Useful for waiting on a daemon-processed HTTP callback (e.g. `/complete`,
+/// `/report`) to land in the on-disk state before asserting on `status`, when
+/// there is no subsequent webhook dispatch to synchronize on instead.
+pub fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if predicate() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "wait_until: condition not met within {timeout:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 // ── run subcommand helpers ────────────────────────────────────────────────────
@@ -560,9 +574,22 @@ impl RunningProcess {
         self.post(&format!("/complete/{task_id}"));
     }
 
-    /// `POST /next` — approves the current `awaiting_approval` task.
+    /// `POST /report/<task_id>` with `{"summary": ...}` body.
+    pub fn report(&self, task_id: &str, summary: &str) {
+        self.post_json(
+            &format!("/report/{task_id}"),
+            serde_json::json!({ "summary": summary }),
+        );
+    }
+
+    /// `POST /approve` — approves the current `awaiting_approval` task.
     pub fn approve(&self) {
-        self.post("/next");
+        self.post("/approve");
+    }
+
+    /// `POST /resume` — resumes a `paused` workflow, re-dispatching in-progress tasks.
+    pub fn resume(&self) {
+        self.post("/resume");
     }
 
     /// `POST /reject/<task_id>`.
@@ -574,6 +601,19 @@ impl RunningProcess {
     pub fn reject_with_reason(&self, task_id: &str, reason: &str) {
         self.post_json(
             &format!("/reject/{task_id}"),
+            serde_json::json!({ "reason": reason }),
+        );
+    }
+
+    /// `POST /pause/<task_id>`.
+    pub fn pause(&self, task_id: &str) {
+        self.post(&format!("/pause/{task_id}"));
+    }
+
+    /// `POST /pause/<task_id>` with `{"reason": ...}` body.
+    pub fn pause_with_reason(&self, task_id: &str, reason: &str) {
+        self.post_json(
+            &format!("/pause/{task_id}"),
             serde_json::json!({ "reason": reason }),
         );
     }

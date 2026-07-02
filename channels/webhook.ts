@@ -32,6 +32,8 @@ When a task instruction arrives, the channel body is a JSON object:
   "task_id":     "implement",
   "task":        "Implement the feature",
   "prompt":      "Follow the design doc and implement …",
+  "skills":      [],
+  "agents":      [],
   "callback_url": "http://127.0.0.1:8789",
   "workflow_id": "4fd261ba-…",
   "outputs":     ["src/**", "tests/**"],
@@ -39,10 +41,19 @@ When a task instruction arrives, the channel body is a JSON object:
 }
 \`\`\`
 
+\`skills\` and \`agents\` are mutually exclusive with each other's presence:
+- If \`agents\` is a non-empty list (and \`prompt\` is null), spawn each named
+  custom agent (\`.claude/agents/<name>.md\`) in parallel via the Agent tool.
+  Each agent reports its own completion by calling /complete on
+  \`{task_id}/{agent_name}\` (see step 4). Only call /complete on the bare
+  \`task_id\` once every agent has finished.
+- If \`skills\` is a non-empty list, invoke each named skill via the Skill tool
+  (in addition to \`prompt\`, if also present).
+
 ## How to handle a task instruction
 
 1. Parse the JSON from the channel body.
-2. Read \`prompt\` and carry out the requested work (edit files, run tests, etc.).
+2. Read \`prompt\` (and/or \`skills\`/\`agents\`, see above) and carry out the requested work (edit files, run tests, etc.).
 3. Respect \`outputs\` (only modify matching paths) and \`deny\` (never touch listed files/commands).
 4. When the work is fully complete, call /complete with a brief summary:
 

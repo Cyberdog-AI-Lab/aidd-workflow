@@ -28,7 +28,8 @@ enum RunEvent {
         task_id: String,
         body: String,
     },
-    Next,
+    Approve,
+    Resume,
     Reject {
         task_id: String,
         reason: Option<String>,
@@ -73,8 +74,13 @@ async fn handle_report(
     "ok"
 }
 
-async fn handle_next(State(state): State<Arc<AppState>>) -> &'static str {
-    state.tx.send(RunEvent::Next).await.ok();
+async fn handle_approve(State(state): State<Arc<AppState>>) -> &'static str {
+    state.tx.send(RunEvent::Approve).await.ok();
+    "ok"
+}
+
+async fn handle_resume(State(state): State<Arc<AppState>>) -> &'static str {
+    state.tx.send(RunEvent::Resume).await.ok();
     "ok"
 }
 
@@ -121,11 +127,15 @@ pub async fn run_workflow(
 
     let app_state = Arc::new(AppState { tx });
     let app = Router::new()
-        .route("/complete/:task_id", post(handle_complete))
-        .route("/report/:task_id", post(handle_report))
-        .route("/next", post(handle_next))
-        .route("/reject/:task_id", post(handle_reject))
-        .route("/pause/:task_id", post(handle_pause))
+        // `*task_id` (not `:task_id`) because sub-agent task IDs contain a
+        // literal `/` (e.g. "quality-check/run-test"); a single-segment
+        // param would not match those paths.
+        .route("/complete/*task_id", post(handle_complete))
+        .route("/report/*task_id", post(handle_report))
+        .route("/approve", post(handle_approve))
+        .route("/resume", post(handle_resume))
+        .route("/reject/*task_id", post(handle_reject))
+        .route("/pause/*task_id", post(handle_pause))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", callback_port))
@@ -208,7 +218,7 @@ pub async fn run_workflow(
                         if wf_status == "awaiting_approval" {
                             eprintln!(
                                 "[run] paused awaiting approval for task '{}'; \
-                                 POST /next to approve or /reject/{} to retry",
+                                 POST /approve to approve or /reject/{} to retry",
                                 task_id, task_id
                             );
                         }
@@ -216,40 +226,17 @@ pub async fn run_workflow(
                 }
             }
 
-            Some(RunEvent::Next) => {
+            Some(RunEvent::Approve) => {
                 let wf_status = store::get_workflow_status(&cwd, &workflow_id)?;
-                if wf_status != "awaiting_approval" && wf_status != "paused" {
+                if wf_status != "awaiting_approval" {
                     eprintln!(
-                        "[run] /next called but workflow is not paused (status: {})",
+                        "[run] /approve called but workflow is not awaiting approval (status: {})",
                         wf_status
                     );
                     continue;
                 }
                 store::set_workflow_status(&cwd, &workflow_id, "active")?;
 
-                if wf_status == "paused" {
-                    // Re-dispatch in_progress tasks that were paused.
-                    let state = store::load_state_by_id(&cwd, &workflow_id)?
-                        .context("workflow state not found after resume")?;
-                    let in_progress: Vec<TaskOutput> = state
-                        .tasks
-                        .iter()
-                        .filter(|(_, s)| s.status == StepStatus::InProgress)
-                        .filter_map(|(id, _)| build_task_output(id, &wf, &config))
-                        .collect();
-                    dispatch_tasks(
-                        &cwd,
-                        &in_progress,
-                        &callback_url,
-                        &webhook_url,
-                        &workflow_id,
-                        &mut dispatched,
-                    )
-                    .await?;
-                    continue;
-                }
-
-                // awaiting_approval path
                 eprintln!("[run] approved; dispatching next tasks");
 
                 let state = store::load_state_by_id(&cwd, &workflow_id)?
@@ -266,6 +253,43 @@ pub async fn run_workflow(
                 dispatch_tasks(
                     &cwd,
                     &next.tasks,
+                    &callback_url,
+                    &webhook_url,
+                    &workflow_id,
+                    &mut dispatched,
+                )
+                .await?;
+            }
+
+            Some(RunEvent::Resume) => {
+                let wf_status = store::get_workflow_status(&cwd, &workflow_id)?;
+                if wf_status != "paused" {
+                    eprintln!(
+                        "[run] /resume called but workflow is not paused (status: {})",
+                        wf_status
+                    );
+                    continue;
+                }
+                store::set_workflow_status(&cwd, &workflow_id, "active")?;
+
+                // Re-dispatch in_progress tasks that were paused. Clear them from
+                // `dispatched` first — they were marked dispatched on their initial
+                // send and dispatch_tasks() skips anything already in that set.
+                let state = store::load_state_by_id(&cwd, &workflow_id)?
+                    .context("workflow state not found after resume")?;
+                let in_progress: Vec<TaskOutput> = state
+                    .tasks
+                    .iter()
+                    .filter(|(_, s)| s.status == StepStatus::InProgress)
+                    .filter_map(|(id, _)| build_task_output(id, &wf, &config))
+                    .collect();
+                for task in &in_progress {
+                    dispatched.remove(&task.task_id);
+                }
+                eprintln!("[run] resumed; re-dispatching in-progress tasks");
+                dispatch_tasks(
+                    &cwd,
+                    &in_progress,
                     &callback_url,
                     &webhook_url,
                     &workflow_id,
@@ -471,6 +495,8 @@ async fn dispatch_tasks(
             "task_id": task.task_id,
             "task": task.task,
             "prompt": task.prompt,
+            "skills": task.skills,
+            "agents": task.agents,
             "callback_url": callback_url,
             "workflow_id": workflow_id,
             "outputs": task.outputs,

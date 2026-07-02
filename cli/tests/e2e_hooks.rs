@@ -12,7 +12,8 @@
 //!   4-9  hooks are no-ops when no workflow is active
 
 mod helpers;
-use helpers::{minimal_report, TempProject};
+use helpers::{pick_free_port, MockWebhook, RunningProcess, TempProject};
+use std::time::Duration;
 
 /// Custom config with a single task that has both `outputs` and `deny`.
 /// Used for all pre-edit and pre-bash tests.
@@ -65,12 +66,17 @@ fn bash_json(proj: &TempProject, command: &str) -> String {
     .to_string()
 }
 
-/// Start the guarded workflow and report for `implement` so it transitions to InProgress.
-/// Hooks only fire for InProgress tasks.
-fn activate_implement(proj: &TempProject) {
-    proj.start("guarded");
-    let body = minimal_report();
-    proj.report("implement", &body);
+/// Start the guarded workflow via the `run` daemon and wait for `implement`
+/// to be dispatched, which marks it InProgress in the DB (hooks only fire
+/// for InProgress tasks). The mock webhook is torn down once dispatch is
+/// confirmed; the caller must keep the returned `RunningProcess` alive for
+/// the duration of the test (state persists on disk regardless).
+fn activate_implement(proj: &TempProject) -> RunningProcess {
+    let webhook = MockWebhook::start();
+    let cb_port = pick_free_port();
+    let proc = proj.start_run("guarded", cb_port, &webhook.url());
+    webhook.wait_for_n(1, Duration::from_secs(5));
+    proc
 }
 
 /// Parse `output.stdout` as a JSON Value; panics with stdout content on failure.
@@ -87,7 +93,7 @@ fn parse_hook_stdout(output: &std::process::Output) -> serde_json::Value {
 #[test]
 fn pre_edit_allows_within_outputs() {
     let proj = TempProject::new(CONFIG_GUARDED);
-    activate_implement(&proj);
+    let _proc = activate_implement(&proj);
 
     let output = proj.hook("pre-edit", &edit_json(&proj, "src/main.rs"));
 
@@ -105,7 +111,7 @@ fn pre_edit_allows_within_outputs() {
 #[test]
 fn pre_edit_asks_outside_outputs() {
     let proj = TempProject::new(CONFIG_GUARDED);
-    activate_implement(&proj);
+    let _proc = activate_implement(&proj);
 
     let output = proj.hook("pre-edit", &edit_json(&proj, "README.md"));
 
@@ -129,7 +135,7 @@ fn pre_edit_asks_outside_outputs() {
 #[test]
 fn pre_edit_blocks_deny_file() {
     let proj = TempProject::new(CONFIG_GUARDED);
-    activate_implement(&proj);
+    let _proc = activate_implement(&proj);
 
     let output = proj.hook("pre-edit", &edit_json(&proj, "docs/specs/design.md"));
 
@@ -153,7 +159,7 @@ fn pre_edit_blocks_deny_file() {
 #[test]
 fn pre_edit_deny_takes_priority_over_outputs() {
     let proj = TempProject::new(CONFIG_GUARDED);
-    activate_implement(&proj);
+    let _proc = activate_implement(&proj);
 
     // docs/specs/** is in deny.files; it is also outside src/** and tests/**
     let output = proj.hook("pre-edit", &edit_json(&proj, "docs/specs/api.yaml"));
@@ -172,7 +178,7 @@ fn pre_edit_deny_takes_priority_over_outputs() {
 #[test]
 fn pre_bash_blocks_denied_command() {
     let proj = TempProject::new(CONFIG_GUARDED);
-    activate_implement(&proj);
+    let _proc = activate_implement(&proj);
 
     // deny.commands = ["git push"] — substring match
     let output = proj.hook("pre-bash", &bash_json(&proj, "git push origin main"));
@@ -197,7 +203,7 @@ fn pre_bash_blocks_denied_command() {
 #[test]
 fn pre_bash_allows_non_denied_command() {
     let proj = TempProject::new(CONFIG_GUARDED);
-    activate_implement(&proj);
+    let _proc = activate_implement(&proj);
 
     let output = proj.hook("pre-bash", &bash_json(&proj, "cargo test --all"));
 

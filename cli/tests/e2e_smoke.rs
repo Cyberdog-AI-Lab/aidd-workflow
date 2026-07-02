@@ -6,9 +6,8 @@ mod helpers;
 #[test]
 fn binary_is_reachable() {
     let proj = helpers::TempProject::new(helpers::CONFIG_MINIMAL);
-    let out = proj.start("simple");
-    assert_eq!(out["status"], "started");
-    let tasks = out["tasks"].as_array().expect("tasks should be an array");
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0]["task_id"], "only-task");
+    let out = proj.list();
+    let items = out.as_array().expect("list should return an array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["slug"], "simple");
 }

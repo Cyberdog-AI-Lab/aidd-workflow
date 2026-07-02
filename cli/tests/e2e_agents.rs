@@ -1,5 +1,9 @@
 //! E2E tests for Scenario 3: release workflow — parallel agents.
 //!
+//! Task progress is driven through a `workflow-runner run` daemon (autonomous
+//! execution mode) via HTTP callbacks, mirroring how a real Claude Code
+//! worker would report sub-agent completions.
+//!
 //! Covers:
 //!   3-1  quality-check dispatches the agents list (not a prompt)
 //!   3-2  completing a sub-agent does not auto-complete the parent
@@ -8,51 +12,60 @@
 //!   3-5  reporting for a sub-agent transitions the parent to InProgress
 
 mod helpers;
-use helpers::{minimal_report, TempProject, CONFIG_STANDARD};
+use helpers::{
+    pick_free_port, wait_until, MockWebhook, RunningProcess, TempProject, CONFIG_STANDARD,
+};
+use std::time::Duration;
+
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Advance the release workflow from `start` to the point where `quality-check`
-/// has been dispatched (implement is Completed, quality-check is Pending).
+/// Start the release workflow via the `run` daemon and advance it to the
+/// point where `quality-check` (the agents task) has just been dispatched.
 ///
-/// Flow:
-///   start release
-///   → complete design (approval: true)
-///   → next (approve design)
-///   → complete implement
-fn advance_to_quality_check(proj: &TempProject) {
-    proj.start("release");
-    proj.complete("design"); // approval: true → awaiting_approval
-    proj.next(); // approve → implement is dispatched
-    proj.complete("implement"); // quality-check becomes executable
+/// Flow: run release → design dispatched → complete design (approval) →
+/// approve → implement dispatched → complete implement → quality-check dispatched.
+fn advance_to_quality_check(
+    proj: &TempProject,
+    webhook: &MockWebhook,
+    cb_port: u16,
+) -> RunningProcess {
+    let proc = proj.start_run("release", cb_port, &webhook.url());
+
+    webhook.wait_for_n(1, TIMEOUT); // design dispatched
+    proc.complete("design"); // approval: true → awaiting_approval
+    std::thread::sleep(Duration::from_millis(100));
+    proc.approve(); // implement dispatched
+
+    webhook.wait_for_n(2, TIMEOUT);
+    proc.complete("implement"); // quality-check becomes executable
+
+    webhook.wait_for_n(3, TIMEOUT); // quality-check dispatched
+    proc
 }
 
 // ── 3-1 ───────────────────────────────────────────────────────────────────────
 
-/// When `implement` completes, `quality-check` (an agents task) must be returned
-/// with an `agents` list and a null `prompt`.  No individual sub-task IDs are
-/// exposed at this level — the SKILL layer spawns agents by name.
+/// When `implement` completes, `quality-check` (an agents task) must be
+/// dispatched with an `agents` list and a null `prompt`. No individual
+/// sub-task IDs are exposed at this level — the worker spawns agents by name.
 #[test]
 fn quality_check_task_returns_agents_list() {
+    let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_STANDARD);
+    let cb_port = pick_free_port();
 
-    proj.start("release");
-    proj.complete("design");
-    proj.next(); // approve
+    let _proc = advance_to_quality_check(&proj, &webhook, cb_port);
 
-    let out = proj.complete("implement");
-    assert_eq!(out["allowed"], true);
-
-    let tasks = out["next"]["tasks"]
-        .as_array()
-        .expect("next.tasks must be an array");
+    let dispatched = webhook.received();
     assert_eq!(
-        tasks.len(),
-        1,
-        "only quality-check should be dispatched after implement"
+        dispatched.len(),
+        3,
+        "only design, implement, and quality-check should be dispatched"
     );
 
-    let qc = &tasks[0];
+    let qc = &dispatched[2];
     assert_eq!(qc["task_id"], "quality-check");
     assert_eq!(qc["task"], "Quality check");
     assert!(
@@ -60,7 +73,6 @@ fn quality_check_task_returns_agents_list() {
         "agents-only tasks must have a null prompt"
     );
 
-    // Both agent names must be present (order preserved from config).
     let agents = qc["agents"].as_array().expect("agents must be an array");
     assert_eq!(agents.len(), 2);
     assert_eq!(agents[0], "run-test");
@@ -70,39 +82,27 @@ fn quality_check_task_returns_agents_list() {
 // ── 3-2 ───────────────────────────────────────────────────────────────────────
 
 /// Completing a sub-agent (`quality-check/run-test`) must:
-///   - allow the transition (gate always passes for registered sub-agents)
-///   - NOT auto-complete the parent task
 ///   - transition the parent to InProgress via sync_agents_parent
-///   - leave the workflow blocked (run-lint is still running)
+///   - NOT auto-complete the parent task
+///   - leave run-lint Pending (still running)
 #[test]
 fn sub_agent_complete_does_not_complete_parent() {
+    let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_STANDARD);
-    advance_to_quality_check(&proj);
+    let cb_port = pick_free_port();
+    let proc = advance_to_quality_check(&proj, &webhook, cb_port);
 
-    let out = proj.complete("quality-check/run-test");
+    proc.complete("quality-check/run-test");
 
-    assert_eq!(
-        out["allowed"], true,
-        "sub-agent completion must always be allowed"
-    );
-    assert_eq!(
-        out["task_id"], "quality-check/run-test",
-        "task_id must reflect the sub-agent"
-    );
+    wait_until(TIMEOUT, || {
+        let status = proj.status();
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"] == "quality-check/run-test" && t["status"] == "completed")
+    });
 
-    // Workflow is blocked: quality-check is InProgress (agent task) so it is
-    // not re-dispatched, and `complete` is blocked by quality-check.
-    assert_eq!(
-        out["next"]["status"], "blocked",
-        "workflow must be blocked while run-lint is still pending"
-    );
-    assert_eq!(
-        out["next"]["tasks"].as_array().map(|a| a.len()),
-        Some(0),
-        "no tasks should be dispatched while waiting for the remaining agent"
-    );
-
-    // Verify DB state via `status`.
     let status = proj.status();
     let tasks = status["tasks"].as_array().expect("tasks must be an array");
 
@@ -118,33 +118,54 @@ fn sub_agent_complete_does_not_complete_parent() {
     // Sub-tasks are visible individually in the status output.
     assert_eq!(find("quality-check/run-test")["status"], "completed");
     assert_eq!(find("quality-check/run-lint")["status"], "pending");
+
+    // No new dispatch (quality-check itself is InProgress, not re-dispatched).
+    assert_eq!(
+        webhook.count(),
+        3,
+        "no further dispatch while run-lint is still pending"
+    );
 }
 
 // ── 3-3 ───────────────────────────────────────────────────────────────────────
 
 /// Attempting to complete the parent task while at least one agent is still
-/// pending must be blocked by the gate, with a reason naming the unfinished agent.
+/// pending must be blocked by the gate — the daemon logs it and does not
+/// dispatch anything further.
 #[test]
 fn parent_gated_until_all_agents_complete() {
+    let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_STANDARD);
-    advance_to_quality_check(&proj);
+    let cb_port = pick_free_port();
+    let proc = advance_to_quality_check(&proj, &webhook, cb_port);
 
     // Complete only one of the two agents.
-    proj.complete("quality-check/run-test");
+    proc.complete("quality-check/run-test");
+    wait_until(TIMEOUT, || {
+        let status = proj.status();
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"] == "quality-check/run-test" && t["status"] == "completed")
+    });
 
-    // Parent completion must be rejected: run-lint is still pending.
-    let out = proj.complete("quality-check");
+    // Attempting to complete the parent must be gated out server-side.
+    proc.complete("quality-check");
+    std::thread::sleep(Duration::from_millis(300));
 
+    let status = proj.status();
+    let tasks = status["tasks"].as_array().unwrap();
+    let qc = tasks.iter().find(|t| t["id"] == "quality-check").unwrap();
     assert_eq!(
-        out["allowed"], false,
-        "parent gate must block until every agent is Completed"
+        qc["status"], "inprogress",
+        "parent must remain InProgress; the gate must reject completion while run-lint is pending"
     );
-    let reason = out["reason"].as_str().expect("reason must be a string");
-    assert!(
-        reason.contains("run-lint"),
-        "reason must name the unfinished agent: got '{reason}'"
+    assert_eq!(
+        webhook.count(),
+        3,
+        "no further dispatch while the parent gate is blocked"
     );
-    assert!(out["next"].is_null());
 }
 
 // ── 3-4 ───────────────────────────────────────────────────────────────────────
@@ -153,59 +174,65 @@ fn parent_gated_until_all_agents_complete() {
 /// and dispatch the next task (`complete`, which has `approval: true`).
 #[test]
 fn parent_passes_gate_when_all_agents_complete() {
+    let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_STANDARD);
-    advance_to_quality_check(&proj);
+    let cb_port = pick_free_port();
+    let proc = advance_to_quality_check(&proj, &webhook, cb_port);
 
     // Complete both agents.
-    let out = proj.complete("quality-check/run-test");
-    assert_eq!(out["allowed"], true);
-    let out = proj.complete("quality-check/run-lint");
-    assert_eq!(out["allowed"], true);
+    proc.complete("quality-check/run-test");
+    proc.complete("quality-check/run-lint");
+    wait_until(TIMEOUT, || {
+        let status = proj.status();
+        let tasks = status["tasks"].as_array().unwrap();
+        tasks
+            .iter()
+            .find(|t| t["id"] == "quality-check/run-lint")
+            .is_some_and(|t| t["status"] == "completed")
+    });
 
-    // Now the parent gate must pass.
-    let out = proj.complete("quality-check");
+    // Now the parent gate must pass and `complete` (approval: true) is dispatched.
+    proc.complete("quality-check");
+    let dispatched = webhook.wait_for_n(4, TIMEOUT);
     assert_eq!(
-        out["allowed"], true,
-        "parent must pass the gate once all agents are Completed"
+        dispatched[3]["task_id"].as_str(),
+        Some("complete"),
+        "the final 'complete' task must be dispatched once the parent gate passes"
     );
-
-    // `complete` (the next task) is dispatched.
-    let next = &out["next"];
-    assert_eq!(next["status"], "in_progress");
-    let next_tasks = next["tasks"]
-        .as_array()
-        .expect("next.tasks must be an array");
-    assert_eq!(next_tasks.len(), 1);
-    assert_eq!(next_tasks[0]["task_id"], "complete");
-    // The final `complete` task has approval: true.
-    assert_eq!(next_tasks[0]["approval"], true);
 }
 
 // ── 3-5 ───────────────────────────────────────────────────────────────────────
 
-/// When `report` is called for a sub-agent, the parent task must transition
-/// from Pending to InProgress (`sync_agents_parent`).
+/// `/report` on a sub-agent only appends an action report — it must not
+/// change any task's status (neither the reporting sub-agent nor its
+/// sibling). Unlike the old synchronous `report` command, the daemon's
+/// dispatcher already marks an agents-parent task InProgress the moment it
+/// is dispatched (see 3-1), so there is no separate "report flips the parent
+/// to InProgress" transition to observe here — the parent is InProgress
+/// before any sub-agent ever reports.
 #[test]
-fn report_to_sub_agent_transitions_parent_to_in_progress() {
+fn report_on_sub_agent_does_not_change_task_statuses() {
+    let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_STANDARD);
-    advance_to_quality_check(&proj);
+    let cb_port = pick_free_port();
+    let proc = advance_to_quality_check(&proj, &webhook, cb_port);
 
-    // Confirm the parent starts as Pending.
     let status_before = proj.status();
     let tasks_before = status_before["tasks"].as_array().unwrap();
     let qc_before = tasks_before
         .iter()
         .find(|t| t["id"] == "quality-check")
         .unwrap();
-    assert_eq!(qc_before["status"], "pending");
+    assert_eq!(
+        qc_before["status"], "inprogress",
+        "the parent is already InProgress as soon as it is dispatched"
+    );
 
-    // Report for one sub-agent.
-    let body = minimal_report();
-    let out = proj.report("quality-check/run-test", &body);
-    assert_eq!(out["ok"], true);
-    assert_eq!(out["task_id"], "quality-check/run-test");
+    // Report for one sub-agent. No further dispatch follows a report, so
+    // give the daemon's async handler a moment to apply it before asserting.
+    proc.report("quality-check/run-test", "in progress");
+    std::thread::sleep(Duration::from_millis(300));
 
-    // Both the sub-agent and the parent should now be InProgress.
     let status_after = proj.status();
     let tasks_after = status_after["tasks"].as_array().unwrap();
 
@@ -219,16 +246,16 @@ fn report_to_sub_agent_transitions_parent_to_in_progress() {
     assert_eq!(
         find("quality-check")["status"],
         "inprogress",
-        "parent must transition to InProgress when any sub-agent reports"
+        "report must not change the parent's status"
     );
     assert_eq!(
         find("quality-check/run-test")["status"],
-        "inprogress",
-        "the reporting sub-agent must be InProgress"
+        "pending",
+        "report must not change the reporting sub-agent's own status"
     );
     assert_eq!(
         find("quality-check/run-lint")["status"],
         "pending",
-        "the other sub-agent must remain Pending"
+        "the other sub-agent must remain unaffected"
     );
 }

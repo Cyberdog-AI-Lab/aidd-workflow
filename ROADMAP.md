@@ -31,7 +31,10 @@ HTTP コールバックで完了を受け取ることで、人手を介さずワ
 │  HTTP コールバックサーバー: 127.0.0.1:8789                       │
 │  ├─ POST /complete/:task_id   タスク完了受信 → 次タスク dispatch  │
 │  ├─ POST /report/:task_id     中間レポート受信（任意）             │
-│  └─ POST /reject/:task_id     タスク却下（approval フロー用）     │
+│  ├─ POST /approve             承認（awaiting_approval → active）  │
+│  ├─ POST /resume              再開（paused → active、再 dispatch）│
+│  ├─ POST /reject/:task_id     タスク却下（approval フロー用）     │
+│  └─ POST /pause/:task_id      エージェント起因の一時中断           │
 │                                                                │
 │  ループ:                                                         │
 │    1. config.yml 読み込み、ワークフロー開始（SQLite に記録）        │
@@ -39,8 +42,9 @@ HTTP コールバックで完了を受け取ることで、人手を介さずワ
 │    3. タスク指示 JSON を Channels webhook (8788) に POST         │
 │    4. /complete/:task_id のコールバックを待つ                     │
 │    5. complete() → 状態更新 → 2 に戻る                          │
-│    6. awaiting_approval → /next または /reject を待つ            │
-│    7. completed → プロセス終了                                   │
+│    6. awaiting_approval → /approve または /reject を待つ         │
+│    7. paused → /resume を待つ                                   │
+│    8. completed → プロセス終了                                   │
 └──────────────┬─────────────────────────────────────────────────┘
                │ POST http://127.0.0.1:8788/
                │ { task_id, task, prompt, callback_url, ... }
@@ -89,7 +93,9 @@ HTTP コールバックで完了を受け取ることで、人手を介さずワ
 3. **Channels webhook への POST** — `reqwest` クレートで `127.0.0.1:8788` に投げる
    - ペイロード: `{ task_id, task, prompt, callback_url, workflow_id }`
    - `callback_url`: `http://127.0.0.1:8789`（コールバックサーバーのベース URL）
-4. **既存 CLI コマンドは維持** — `start` / `next` / `complete` 等は引き続き動作する
+4. ~~既存 CLI コマンドは維持~~ — `start` / `next` / `report` / `complete` は後日（v0.0.2 完了後）
+   自律実行モードへの一本化に伴い削除された。`approve` / `resume` / `reject` （常駐デーモンへの
+   HTTP クライアント）に置き換わっている。詳細は [ARCHITECTURE.md](./ARCHITECTURE.md) を参照
 
 #### 使用クレート候補
 
@@ -102,7 +108,7 @@ HTTP コールバックで完了を受け取ることで、人手を介さずワ
 #### 完了基準
 
 - `workflow-runner run bug-fix` を実行するとワークフローが自律的にエンドツーエンドで完了する
-- 既存の CLI（`workflow-runner start` / `complete` 等）が引き続き動作する
+- ~~既存の CLI（`workflow-runner start` / `complete` 等）が引き続き動作する~~（後日削除、上記参照）
 - `cargo test` が全て通過する
 
 ---
@@ -154,7 +160,7 @@ SKILL.md は廃止し、Claude Code の動作は MCP サーバーの `instructio
 
 - Claude Code セッションを開いた状態で `workflow-runner run bug-fix` を実行すると、
   人手を介さずワークフローがエンドツーエンドで完了する
-- `awaiting_approval` タスクで自動停止し、外部から `/next` または `/reject` を呼べる
+- `awaiting_approval` タスクで自動停止し、外部から `/approve`（旧 `/next`）または `/reject` を呼べる
 - SKILL.md なしでワークフローが動作する
 - README.md / ARCHITECTURE.md が更新されている
 
@@ -264,7 +270,7 @@ dashboard-ui/         # React + Vite のフロントエンド（独立した npm
 #### 承認キュー・アクション
 
 - `awaiting_approval` のタスクを一覧表示
-- ブラウザから承認（`workflow-runner next` 相当）/ 却下（`workflow-runner reject` 相当）を実行
+- ブラウザから承認（`workflow-runner approve` 相当）/ 却下（`workflow-runner reject` 相当）を実行
 
 #### ログ詳細ビュー
 
@@ -297,13 +303,13 @@ dashboard-ui/         # React + Vite のフロントエンド（独立した npm
 
 ### 背景・動機
 
-v0.0.2 で実装したコールバックサーバーの `/next` / `/reject` エンドポイントはローカルネットワーク（127.0.0.1）にしか公開されていない。
+v0.0.2 で実装したコールバックサーバーの `/approve` / `/reject` エンドポイントはローカルネットワーク（127.0.0.1）にしか公開されていない。
 承認担当者がローカルマシンの前にいない場合でも、Slack や GitHub のインターフェース上から承認操作を行えるようにする。
 
 ### 実装内容
 
 - `awaiting_approval` 時に Slack Webhook または GitHub PR コメントへ通知を送信
-- 通知メッセージに `/next`（承認）/ `/reject/:task_id`（却下）の URL を含める
+- 通知メッセージに `/approve`（承認）/ `/reject/:task_id`（却下）の URL を含める
 - コールバックサーバーのエンドポイントを外部から呼べるようにするためのトンネル設定例（ngrok 等）を docs に追加
 
 ### 完了基準

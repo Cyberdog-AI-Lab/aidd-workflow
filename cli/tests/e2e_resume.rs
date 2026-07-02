@@ -1,95 +1,111 @@
-//! E2E tests for Scenario 7: resume (interrupted workflow recovery).
+//! E2E tests for Scenario 7: pause / resume (agent-initiated interruption).
+//!
+//! When a Claude Code worker cannot proceed without user input, it POSTs
+//! `/pause/:task_id` to the `run` daemon, which marks the workflow `paused`
+//! and stops dispatching further tasks. `workflow-runner resume` (a thin
+//! HTTP client, mirroring `approve`/`reject`) POSTs `/resume`, which
+//! re-dispatches whatever task was InProgress when the pause happened.
+//!
+//! Note: this re-dispatch previously silently no-op'd because the paused
+//! task_id was never cleared from the daemon's `dispatched` bookkeeping set
+//! (dispatch_tasks skips anything already in that set) — the pause/resume
+//! path had no test coverage until this file. That bug is fixed in
+//! `cmd/run.rs`'s `RunEvent::Resume` handler; these tests guard it.
 //!
 //! Covers:
-//!   7-1  resume after partial progress returns the remaining actionable tasks
-//!   7-2  resume with no active workflow returns an error
-//!   7-3  resume in awaiting_approval state returns the next executable tasks
-//!        (resume bypasses the approval gate by design — use `next` for approval)
+//!   7-1  /pause stops further automatic activity; /resume re-dispatches the task
+//!   7-2  `workflow-runner resume` CLI reaches the daemon and re-dispatches
+//!   7-3  `workflow-runner resume` outside a paused state is a silent no-op
 
 mod helpers;
-use helpers::{TempProject, CONFIG_STANDARD};
+use helpers::{pick_free_port, MockWebhook, TempProject, CONFIG_MINIMAL};
+use std::time::Duration;
+
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── 7-1 ───────────────────────────────────────────────────────────────────────
 
-/// After completing some tasks in a session, `resume` (as called at the start
-/// of a new session) must return exactly the tasks that can currently run.
+/// POST /pause must stop dispatch; POST /resume must re-dispatch the same
+/// InProgress task and allow the workflow to complete normally afterward.
 #[test]
-fn resume_returns_actionable_tasks_after_partial_progress() {
-    let proj = TempProject::new(CONFIG_STANDARD);
-    proj.start("bug-fix");
+fn pause_then_resume_redispatches_task() {
+    let webhook = MockWebhook::start();
+    let proj = TempProject::new(CONFIG_MINIMAL);
+    let cb_port = pick_free_port();
+    let mut proc = proj.start_run("simple", cb_port, &webhook.url());
 
-    // Complete `reproduce` — now only `identify` is independently runnable.
-    // `implement` still needs both `reproduce` (done) and `identify` (pending).
-    proj.complete("reproduce");
+    webhook.wait_for_n(1, TIMEOUT); // only-task dispatched
+    proc.pause_with_reason("only-task", "need clarification from the user");
 
-    // Simulate a new session: `resume` re-derives state from the DB.
-    let out = proj.resume();
-
-    assert_eq!(out["status"], "in_progress");
-    assert_eq!(out["workflow"], "bug-fix");
-
-    let tasks = out["tasks"].as_array().expect("tasks must be an array");
-    let ids: Vec<&str> = tasks
-        .iter()
-        .map(|t| t["task_id"].as_str().unwrap())
-        .collect();
-
-    assert!(
-        ids.contains(&"identify"),
-        "identify must be actionable after reproduce completes"
+    // No further dispatch happens on its own while paused.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        webhook.count(),
+        1,
+        "paused workflow must not dispatch anything new"
     );
-    assert!(
-        !ids.contains(&"implement"),
-        "implement must not appear until both its requires are met"
+
+    proc.resume();
+
+    let dispatched = webhook.wait_for_n(2, TIMEOUT);
+    assert_eq!(
+        dispatched[1]["task_id"].as_str(),
+        Some("only-task"),
+        "the paused task must be re-dispatched after /resume"
     );
-    assert!(
-        !ids.contains(&"reproduce"),
-        "completed tasks must not reappear on resume"
-    );
+
+    // The workflow can still complete normally afterward.
+    proc.complete("only-task");
+    let status = proc.wait_exit(TIMEOUT);
+    assert!(status.success(), "workflow must complete after resuming");
 }
 
 // ── 7-2 ───────────────────────────────────────────────────────────────────────
 
-/// `resume` with no active workflow must fail with exit code 1.
+/// `workflow-runner resume --callback-port <port>` must reach the daemon and
+/// produce the same re-dispatch as a raw POST /resume.
 #[test]
-fn resume_without_active_workflow_returns_error() {
-    let proj = TempProject::new(CONFIG_STANDARD);
-    // No `start` call — nothing in the DB.
-    let stderr = proj.assert_err(&["resume"]);
-    assert!(
-        !stderr.is_empty(),
-        "resume must produce an error message when no workflow is active"
-    );
+fn resume_cli_redispatches_paused_task() {
+    let webhook = MockWebhook::start();
+    let proj = TempProject::new(CONFIG_MINIMAL);
+    let cb_port = pick_free_port();
+    let proc = proj.start_run("simple", cb_port, &webhook.url());
+
+    webhook.wait_for_n(1, TIMEOUT);
+    proc.pause("only-task");
+    std::thread::sleep(Duration::from_millis(100));
+
+    let out = proj.resume_cli(cb_port);
+    assert_eq!(out["ok"], true);
+    assert_eq!(out["action"], "resume");
+
+    let dispatched = webhook.wait_for_n(2, TIMEOUT);
+    assert_eq!(dispatched[1]["task_id"].as_str(), Some("only-task"));
 }
 
 // ── 7-3 ───────────────────────────────────────────────────────────────────────
 
-/// When a workflow is in `awaiting_approval` state, `resume` returns the next
-/// *executable* tasks based on the task-level DB state, bypassing the approval
-/// gate.  This is intentional: `resume` is a session-recovery command, not an
-/// approval mechanism.  Use `next` (which resets the gate) for approval.
+/// `workflow-runner resume` sent while the workflow is NOT paused must still
+/// exit 0 (the daemon was reachable) but must not trigger any redispatch.
 #[test]
-fn resume_in_awaiting_approval_returns_executable_tasks() {
-    let proj = TempProject::new(CONFIG_STANDARD);
-    proj.start("feature");
+fn resume_cli_outside_paused_state_is_noop() {
+    let webhook = MockWebhook::start();
+    let proj = TempProject::new(CONFIG_MINIMAL);
+    let cb_port = pick_free_port();
+    let _proc = proj.start_run("simple", cb_port, &webhook.url());
 
-    // Complete `design` (approval: true) → workflow enters awaiting_approval.
-    let complete_out = proj.complete("design");
-    assert_eq!(complete_out["next"]["status"], "awaiting_approval");
+    webhook.wait_for_n(1, TIMEOUT); // workflow is "active", never paused
 
-    // `resume` reflects the DB task states (design=Completed, implement=Pending).
-    // Since implement's requires are satisfied, it appears as executable.
-    let out = proj.resume();
-
+    let out = proj.resume_cli(cb_port);
     assert_eq!(
-        out["status"], "in_progress",
-        "resume must return in_progress (not awaiting_approval) — \
-         it reads task states, not the workflow-level approval gate"
+        out["ok"], true,
+        "the CLI only confirms the daemon was reachable, not that resume applied"
     );
-    let tasks = out["tasks"].as_array().expect("tasks must be an array");
-    assert_eq!(tasks.len(), 1);
+
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
-        tasks[0]["task_id"], "implement",
-        "implement must appear on resume once design is Completed"
+        webhook.count(),
+        1,
+        "resume outside a paused workflow must not cause a redispatch"
     );
 }

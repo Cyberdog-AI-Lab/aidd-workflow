@@ -7,25 +7,17 @@ mod protocol;
 mod providers;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use clap::{Parser, Subcommand};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use adapters::hooks::hook_handler;
 use config::loader::{load_and_merge_config, load_config, validate as validate_config};
-use engine::state::{ActionReport, StepStatus, WorkflowState};
-use engine::store::{
-    clear_state_by_id, get_workflow_status, load_state, load_state_by_id, save_state,
-    set_workflow_status,
-};
-use engine::{dag, executor, gate};
-use protocol::{
-    input::ReportInput,
-    output::{
-        build_status, format_status_table, format_validate_text, CompleteOutput, ErrorOutput,
-        FlowStatus, RejectOutput, ValidateOutput, WorkflowListItem, WorkflowOutput,
-    },
+use engine::state::WorkflowState;
+use engine::store::{load_state, load_state_by_id};
+use protocol::output::{
+    build_status, format_status_table, format_validate_text, ErrorOutput, ValidateOutput,
+    WorkflowListItem,
 };
 
 #[derive(Parser)]
@@ -65,23 +57,40 @@ enum Commands {
         #[arg(long, conflicts_with = "webhook_port")]
         webhook_url: Option<String>,
     },
-    /// Start a workflow and return the first set of tasks.
-    Start { workflow: String },
-    /// Return the next set of tasks. When awaiting approval, calling this approves and proceeds.
-    Next,
-    /// Record a task progress report (stdin: JSON with optional summary field).
-    Report { task_id: String },
-    /// Mark a task as complete (with gate check).
-    Complete { task_id: String },
-    /// Reject an awaiting-approval task and retry it.
+    /// Approve an awaiting-approval task on a running `workflow-runner run` daemon
+    /// (POST /approve on its callback server).
+    Approve {
+        /// Port of the running daemon's callback server (conflicts with --callback-url) [default: 8789].
+        #[arg(long, conflicts_with = "callback_url")]
+        callback_port: Option<u16>,
+        /// Full callback base URL of the running daemon (conflicts with --callback-port).
+        #[arg(long, conflicts_with = "callback_port")]
+        callback_url: Option<String>,
+    },
+    /// Resume a paused task (e.g. after an agent called `pause`) on a running
+    /// `workflow-runner run` daemon (POST /resume on its callback server).
+    Resume {
+        /// Port of the running daemon's callback server (conflicts with --callback-url) [default: 8789].
+        #[arg(long, conflicts_with = "callback_url")]
+        callback_port: Option<u16>,
+        /// Full callback base URL of the running daemon (conflicts with --callback-port).
+        #[arg(long, conflicts_with = "callback_port")]
+        callback_url: Option<String>,
+    },
+    /// Reject an awaiting-approval task and retry it, on a running
+    /// `workflow-runner run` daemon (POST /reject/:task_id on its callback server).
     Reject {
         task_id: String,
         /// Developer feedback explaining the rejection.
         #[arg(long)]
         reason: Option<String>,
+        /// Port of the running daemon's callback server (conflicts with --callback-url) [default: 8789].
+        #[arg(long, conflicts_with = "callback_url")]
+        callback_port: Option<u16>,
+        /// Full callback base URL of the running daemon (conflicts with --callback-port).
+        #[arg(long, conflicts_with = "callback_port")]
+        callback_url: Option<String>,
     },
-    /// Return resume information for an interrupted workflow.
-    Resume,
     /// Return the current execution state.
     Status {
         /// Output format: json (default) or table
@@ -153,14 +162,20 @@ fn run(cmd: Commands, cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
             ))?;
             Ok(String::new())
         }
-        Commands::Start { workflow } => cmd_start(cwd, &workflow),
-        Commands::Next => cmd_next(cwd, workflow_id),
-        Commands::Report { task_id } => cmd_report(cwd, &task_id, workflow_id),
-        Commands::Complete { task_id } => cmd_complete(cwd, &task_id, workflow_id),
-        Commands::Reject { task_id, reason } => {
-            cmd_reject(cwd, &task_id, reason.as_deref(), workflow_id)
-        }
-        Commands::Resume => cmd_resume(cwd, workflow_id),
+        Commands::Approve {
+            callback_port,
+            callback_url,
+        } => cmd_approve(callback_port, callback_url),
+        Commands::Resume {
+            callback_port,
+            callback_url,
+        } => cmd_resume(callback_port, callback_url),
+        Commands::Reject {
+            task_id,
+            reason,
+            callback_port,
+            callback_url,
+        } => cmd_reject(&task_id, reason.as_deref(), callback_port, callback_url),
         Commands::Status { format } => cmd_status(cwd, &format, workflow_id),
         Commands::Validate { format } => cmd_validate(cwd, &format),
         Commands::List => cmd_list(cwd),
@@ -177,252 +192,53 @@ fn resolve_state(cwd: &Path, workflow_id: Option<&str>) -> Result<Option<Workflo
     }
 }
 
-fn cmd_start(cwd: &Path, workflow_name: &str) -> Result<String> {
-    let config = load_config(cwd)?;
-    let wf = config
-        .workflows
-        .get(workflow_name)
-        .with_context(|| format!("workflow '{}' not found in config.yml", workflow_name))?;
-
-    let state = WorkflowState::new(workflow_name, wf);
-    save_state(cwd, &state)?;
-
-    let mut output = executor::build_next(wf, &state, &config);
-    if matches!(output.status, FlowStatus::InProgress) {
-        output.status = FlowStatus::Started;
-    }
-    Ok(serde_json::to_string_pretty(&output)?)
+/// Resolves the daemon's callback base URL from CLI flags, matching the
+/// defaulting logic used by `workflow-runner run` itself.
+fn resolve_callback_base_url(callback_port: Option<u16>, callback_url: Option<String>) -> String {
+    callback_url.unwrap_or_else(|| format!("http://127.0.0.1:{}", callback_port.unwrap_or(8789)))
 }
 
-fn cmd_next(cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
-    let config = load_config(cwd)?;
-    let state = resolve_state(cwd, workflow_id)?
-        .context("no workflow in progress; run `workflow-runner start <workflow>` first")?;
-    let wf = config
-        .workflows
-        .get(&state.workflow)
-        .with_context(|| format!("workflow '{}' not found in config.yml", state.workflow))?;
-
-    // When awaiting approval, calling `next` acts as approval: clear the gate and proceed.
-    let wf_status = get_workflow_status(cwd, &state.workflow_id)?;
-    if wf_status == "awaiting_approval" {
-        set_workflow_status(cwd, &state.workflow_id, "active")?;
-    }
-
-    let output = executor::build_next(wf, &state, &config);
-    Ok(serde_json::to_string_pretty(&output)?)
-}
-
-fn cmd_report(cwd: &Path, task_id: &str, workflow_id: Option<&str>) -> Result<String> {
-    let input_str = read_stdin()?;
-    let summary = serde_json::from_str::<ReportInput>(&input_str)
-        .ok()
-        .and_then(|i| i.summary);
-
-    let config = load_config(cwd)?;
-    let mut state = resolve_state(cwd, workflow_id)?.context("no workflow in progress")?;
-    let wf = config
-        .workflows
-        .get(&state.workflow)
-        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
-
-    if !state.tasks.contains_key(task_id) {
-        anyhow::bail!(
-            "unknown task_id '{}' for workflow '{}'",
-            task_id,
-            state.workflow
-        );
-    }
-
-    {
-        let s = state.tasks.entry(task_id.to_string()).or_default();
-        if s.status == StepStatus::Pending {
-            s.status = StepStatus::InProgress;
-            s.started_at = Some(Utc::now());
-        }
-        s.action_reports.push(ActionReport {
-            action_index: s.action_reports.len(),
-            action_type: "report".to_string(),
-            exit_code: None,
-            stdout: summary,
-            recorded_at: Utc::now(),
-        });
-    }
-
-    if let Some(parent_id) = dag::parent_of(task_id) {
-        state.sync_agents_parent(parent_id, wf)?;
-    }
-
-    save_state(cwd, &state)?;
-
-    let out = serde_json::json!({ "ok": true, "task_id": task_id });
-    Ok(out.to_string())
-}
-
-fn cmd_complete(cwd: &Path, task_id: &str, workflow_id: Option<&str>) -> Result<String> {
-    let config = load_config(cwd)?;
-    let mut state = resolve_state(cwd, workflow_id)?.context("no workflow in progress")?;
-    let wf = config
-        .workflows
-        .get(&state.workflow)
-        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
-
-    let gate_result = gate::check(wf, &state, task_id);
-    if !gate_result.allowed {
-        let output = CompleteOutput {
-            task_id: task_id.to_string(),
-            allowed: false,
-            reason: gate_result.reason,
-            next: None,
-        };
-        return Ok(serde_json::to_string_pretty(&output)?);
-    }
-
-    {
-        let s = state.tasks.entry(task_id.to_string()).or_default();
-        s.status = StepStatus::Completed;
-        s.completed_at = Some(Utc::now());
-    }
-
-    if let Some(parent_id) = dag::parent_of(task_id) {
-        state.sync_agents_parent(parent_id, wf)?;
-    }
-
-    save_state(cwd, &state)?;
-
-    // For parent tasks (not sub-agents): check approval flag.
-    if dag::parent_of(task_id).is_none() {
-        if let Some(task_cfg) = wf.tasks.iter().find(|t| t.id == task_id) {
-            if task_cfg.approval {
-                set_workflow_status(cwd, &state.workflow_id, "awaiting_approval")?;
-                let output = CompleteOutput {
-                    task_id: task_id.to_string(),
-                    allowed: true,
-                    reason: None,
-                    next: Some(WorkflowOutput {
-                        workflow_id: state.workflow_id.clone(),
-                        workflow: state.workflow.clone(),
-                        status: FlowStatus::AwaitingApproval,
-                        tasks: vec![],
-                    }),
-                };
-                return Ok(serde_json::to_string_pretty(&output)?);
-            }
-        }
-    }
-
-    let next = executor::build_next(wf, &state, &config);
-    if matches!(next.status, FlowStatus::Completed) {
-        clear_state_by_id(cwd, &state.workflow_id)?;
-    }
-
-    let output = CompleteOutput {
-        task_id: task_id.to_string(),
-        allowed: true,
-        reason: None,
-        next: Some(next),
+/// POSTs to a running `workflow-runner run` daemon's callback server.
+/// The daemon replies unconditionally with `"ok"` regardless of whether the
+/// event applied (e.g. approving when nothing is awaiting approval), so this
+/// only confirms that the daemon was reachable, not that the action took effect.
+fn post_to_daemon(url: &str, body: Option<serde_json::Value>) -> Result<()> {
+    let client = reqwest::blocking::Client::new();
+    let req = match body {
+        Some(b) => client.post(url).json(&b),
+        None => client.post(url),
     };
-    Ok(serde_json::to_string_pretty(&output)?)
+    req.send().with_context(|| {
+        format!(
+            "failed to reach workflow-runner run daemon at {}; is `workflow-runner run` running?",
+            url
+        )
+    })?;
+    Ok(())
+}
+
+fn cmd_approve(callback_port: Option<u16>, callback_url: Option<String>) -> Result<String> {
+    let base = resolve_callback_base_url(callback_port, callback_url);
+    post_to_daemon(&format!("{}/approve", base), None)?;
+    Ok(serde_json::json!({ "ok": true, "action": "approve" }).to_string())
+}
+
+fn cmd_resume(callback_port: Option<u16>, callback_url: Option<String>) -> Result<String> {
+    let base = resolve_callback_base_url(callback_port, callback_url);
+    post_to_daemon(&format!("{}/resume", base), None)?;
+    Ok(serde_json::json!({ "ok": true, "action": "resume" }).to_string())
 }
 
 fn cmd_reject(
-    cwd: &Path,
     task_id: &str,
     reason: Option<&str>,
-    workflow_id: Option<&str>,
+    callback_port: Option<u16>,
+    callback_url: Option<String>,
 ) -> Result<String> {
-    let config = load_config(cwd)?;
-    let mut state = resolve_state(cwd, workflow_id)?
-        .context("no workflow in progress (or not awaiting approval)")?;
-    let wf = config
-        .workflows
-        .get(&state.workflow)
-        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
-
-    let wf_status = get_workflow_status(cwd, &state.workflow_id)?;
-    if wf_status != "awaiting_approval" {
-        anyhow::bail!(
-            "workflow is not awaiting approval (current status: {}); nothing to reject",
-            wf_status
-        );
-    }
-
-    // Validate that the given task_id exists in the workflow config.
-    if !wf.tasks.iter().any(|t| t.id == task_id) {
-        anyhow::bail!(
-            "task '{}' not found in workflow '{}'",
-            task_id,
-            state.workflow
-        );
-    }
-    // Only Completed tasks can be rejected (the approval gate fires after completion).
-    if !matches!(
-        state.tasks.get(task_id).map(|s| &s.status),
-        Some(StepStatus::Completed)
-    ) {
-        anyhow::bail!(
-            "task '{}' is not in Completed state; cannot reject",
-            task_id
-        );
-    }
-
-    // Reset task to InProgress and record rejection reason.
-    {
-        let s = state.tasks.entry(task_id.to_string()).or_default();
-        s.status = StepStatus::InProgress;
-        s.completed_at = None;
-        if let Some(reason_str) = reason {
-            s.action_reports.push(ActionReport {
-                action_index: s.action_reports.len(),
-                action_type: "reject".to_string(),
-                exit_code: None,
-                stdout: Some(reason_str.to_string()),
-                recorded_at: Utc::now(),
-            });
-        }
-    }
-
-    // Clear the approval gate.
-    set_workflow_status(cwd, &state.workflow_id, "active")?;
-    save_state(cwd, &state)?;
-
-    // Build the task output for re-dispatch.
-    let task_output =
-        wf.tasks
-            .iter()
-            .find(|t| t.id == task_id)
-            .map(|task| protocol::output::TaskOutput {
-                task_id: task.id.clone(),
-                task: task.task.clone(),
-                prompt: task
-                    .prompt
-                    .as_deref()
-                    .map(|p| executor::resolve_template(p, &config)),
-                skills: task.skills.clone(),
-                agents: task.agents.clone(),
-                outputs: task.outputs.clone(),
-                deny: task.deny.clone(),
-                approval: task.approval,
-            });
-
-    let output = RejectOutput {
-        task_id: task_id.to_string(),
-        reason: reason.map(str::to_string),
-        task: task_output,
-    };
-    Ok(serde_json::to_string_pretty(&output)?)
-}
-
-fn cmd_resume(cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
-    let config = load_config(cwd)?;
-    let state = resolve_state(cwd, workflow_id)?.context("no workflow in progress")?;
-    let wf = config
-        .workflows
-        .get(&state.workflow)
-        .with_context(|| format!("workflow '{}' not found", state.workflow))?;
-
-    let output = executor::build_next(wf, &state, &config);
-    Ok(serde_json::to_string_pretty(&output)?)
+    let base = resolve_callback_base_url(callback_port, callback_url);
+    let body = reason.map(|r| serde_json::json!({ "reason": r }));
+    post_to_daemon(&format!("{}/reject/{}", base, task_id), body)?;
+    Ok(serde_json::json!({ "ok": true, "action": "reject", "task_id": task_id }).to_string())
 }
 
 fn cmd_status(cwd: &Path, format: &str, workflow_id: Option<&str>) -> Result<String> {

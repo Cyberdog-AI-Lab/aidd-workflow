@@ -15,7 +15,7 @@ curl -sX POST :8789/complete/{task_id}
         ↓（workflow-runner が次のタスクを dispatch）
 完了するまでループ
         ↓（approval: true のタスクなら）
-awaiting_approval → curl POST :8789/next で承認 / :8789/reject/{task_id} で却下
+awaiting_approval → workflow-runner approve で承認 / workflow-runner reject <task-id> で却下
 ```
 
 詳細なアーキテクチャは [ARCHITECTURE.md](./ARCHITECTURE.md) を参照。
@@ -109,27 +109,36 @@ workflow-runner run feature    # 機能開発フローを自律実行
 `workflow-runner run` が Channels 経由でタスクを Claude Code に push し、
 人手を介さずワークフローをエンドツーエンドで実行する。
 
-`approval: true` のタスクでは自動停止する。外部から承認・却下できる：
+`approval: true` のタスクでは自動停止する（`awaiting_approval`）。CLI から承認・却下できる：
 
 ```bash
-# 承認
-curl -sX POST http://127.0.0.1:8789/next
+./target/debug/workflow-runner approve                                 # 承認 → 次タスクへ
+./target/debug/workflow-runner reject <task-id> --reason "<理由>"      # 却下 → タスクを再実行
+```
 
-# 却下
+エージェントが `pause` で作業を中断した場合（ユーザーへの確認待ちなど）は `resume` で再開する：
+
+```bash
+./target/debug/workflow-runner resume                                  # 中断タスクを再 dispatch
+```
+
+`approve` / `resume` / `reject` はいずれも稼働中の `workflow-runner run` デーモンのコールバック
+サーバー（デフォルト `http://127.0.0.1:8789`）に HTTP POST するだけの薄いクライアント。
+別ホスト・別ポートのデーモンに向ける場合は `--callback-port <PORT>` または
+`--callback-url <URL>` を指定する。curl で直接叩くことも可能（同じエンドポイントを使う）：
+
+```bash
+curl -sX POST http://127.0.0.1:8789/approve
+curl -sX POST http://127.0.0.1:8789/resume
 curl -sX POST http://127.0.0.1:8789/reject/<task-id> \
   -H 'Content-Type: application/json' \
   -d '{"reason":"設計が不十分です"}'
 ```
 
-### CLI から直接操作
+その他の CLI コマンド（デーモンの起動を必要としない）：
 
 ```bash
 ./target/debug/workflow-runner list                                    # ワークフロー一覧
-./target/debug/workflow-runner start bug-fix                           # 開始（tasks JSON を返す）
-./target/debug/workflow-runner next                                    # 次のタスク確認 / 承認
-./target/debug/workflow-runner complete <task-id>                      # タスク完了
-./target/debug/workflow-runner complete <parent-id>/<agent-name>       # エージェント完了
-./target/debug/workflow-runner reject <task-id> --reason "<理由>"      # タスク却下・再実行
 ./target/debug/workflow-runner status                                  # 現在の状態（JSON）
 ./target/debug/workflow-runner status --format table                   # 現在の状態（ターミナルテーブル）
 ./target/debug/workflow-runner validate                                # config.yml 検証（JSON）
@@ -208,8 +217,8 @@ workflows:
 `approval: true` を付けたタスクは、`complete` 後に `awaiting_approval` 状態へ遷移する。
 
 ```bash
-# 承認（next が承認ゲートを解除して次タスクを返す）
-./target/debug/workflow-runner next
+# 承認（approve が承認ゲートを解除して次タスクを dispatch）
+./target/debug/workflow-runner approve
 
 # 却下（タスクを InProgress に戻して再実行）
 ./target/debug/workflow-runner reject <task-id> --reason "設計が不十分です"
