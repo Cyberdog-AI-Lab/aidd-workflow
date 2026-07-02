@@ -11,11 +11,11 @@
 //! Covers:
 //!   2-1  `approve` CLI advances an awaiting_approval workflow and expands template vars
 //!   2-2  `reject` CLI with --reason re-dispatches the rejected task
-//!   2-3  `reject` CLI outside awaiting_approval is a silent no-op (no redispatch)
+//!   2-3  `reject` CLI outside awaiting_approval fails client-side (no target to resolve)
 //!   2-4  `approve` CLI on the final approval-gated task completes the workflow
 
 mod helpers;
-use helpers::{pick_free_port, MockWebhook, TempProject, CONFIG_STANDARD};
+use helpers::{pick_free_port, wait_workflow_completed, MockWebhook, TempProject, CONFIG_STANDARD};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -108,13 +108,14 @@ fn reject_cli_with_reason_redispatches_task() {
 
 // ── 2-3 ───────────────────────────────────────────────────────────────────────
 
-/// `workflow-runner reject` sent while the workflow is NOT awaiting approval
-/// must still exit 0 (the daemon was reachable) but must not trigger any
-/// redispatch — the daemon silently ignores it server-side. This is the
-/// tradeoff of a fire-and-forget HTTP client: the CLI can only confirm
-/// delivery, not that the action actually applied.
+/// `workflow-runner reject` sent while no workflow is awaiting approval must
+/// fail client-side: without `--workflow-id`, the CLI resolves its target by
+/// querying the local store for a workflow with status `awaiting_approval`,
+/// and errors out immediately (before ever reaching the daemon) when none
+/// exists. This replaces the old fire-and-forget behavior where the CLI could
+/// only confirm delivery, never whether the action actually applied.
 #[test]
-fn reject_cli_outside_approval_state_is_noop() {
+fn reject_cli_outside_approval_state_fails_to_resolve_target() {
     let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_STANDARD);
     let cb_port = pick_free_port();
@@ -122,13 +123,13 @@ fn reject_cli_outside_approval_state_is_noop() {
 
     webhook.wait_for_n(1, TIMEOUT); // design dispatched, workflow still "active"
 
-    let out = proj.reject_cli("design", cb_port);
-    assert_eq!(
-        out["ok"], true,
-        "the CLI only confirms the daemon was reachable, not that the reject applied"
+    let stderr = proj.assert_err(&["reject", "design", "--callback-port", &cb_port.to_string()]);
+    assert!(
+        stderr.contains("awaiting_approval"),
+        "error must explain that no workflow is awaiting approval: got '{stderr}'"
     );
 
-    // No new dispatch should occur since the workflow was never awaiting approval.
+    // No new dispatch should occur since the reject never reached the daemon.
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         webhook.count(),
@@ -146,7 +147,7 @@ fn approve_cli_on_final_task_completes_workflow() {
     let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_SIGN_OFF);
     let cb_port = pick_free_port();
-    let mut proc = proj.start_run("sign-off-flow", cb_port, &webhook.url());
+    let proc = proj.start_run("sign-off-flow", cb_port, &webhook.url());
 
     webhook.wait_for_n(1, TIMEOUT); // work dispatched
     proc.complete("work");
@@ -157,9 +158,5 @@ fn approve_cli_on_final_task_completes_workflow() {
 
     proj.approve_cli(cb_port);
 
-    let status = proc.wait_exit(TIMEOUT);
-    assert!(
-        status.success(),
-        "workflow must complete after the final approval is granted"
-    );
+    wait_workflow_completed(&proj, &proc.workflow_id, TIMEOUT);
 }

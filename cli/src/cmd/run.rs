@@ -1,40 +1,54 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::{
     extract::{Path as AxumPath, State},
+    http::StatusCode,
     routing::post,
     Router,
 };
 use chrono::Utc;
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::loader::load_config;
 use crate::config::types::{Config, Workflow};
 use crate::engine::state::{ActionReport, StepStatus};
 use crate::engine::{dag, executor, gate, store};
-use crate::protocol::input::{CompleteInput, PauseInput, ReportInput};
-use crate::protocol::output::{FlowStatus, TaskOutput};
+use crate::protocol::input::{CompleteInput, PauseInput, ReportInput, RunInput};
+use crate::protocol::output::{ErrorOutput, FlowStatus, RunOutput, TaskOutput};
 
 enum RunEvent {
+    Run {
+        workflow_name: String,
+        respond_to: oneshot::Sender<Result<RunOutput, String>>,
+    },
+    Stop,
     Complete {
+        workflow_id: String,
         task_id: String,
         summary: Option<String>,
     },
     Report {
+        workflow_id: String,
         task_id: String,
         body: String,
     },
-    Approve,
-    Resume,
+    Approve {
+        workflow_id: String,
+    },
+    Resume {
+        workflow_id: String,
+    },
     Reject {
+        workflow_id: String,
         task_id: String,
         reason: Option<String>,
     },
     Pause {
+        workflow_id: String,
         task_id: String,
         reason: Option<String>,
     },
@@ -44,13 +58,73 @@ struct AppState {
     tx: mpsc::Sender<RunEvent>,
 }
 
+/// A single workflow instance currently tracked by the daemon.
+struct RunningWorkflow {
+    wf: Workflow,
+    dispatched: HashSet<String>,
+}
+
 #[derive(Deserialize)]
 struct RejectBody {
     reason: Option<String>,
 }
 
+async fn handle_run(State(state): State<Arc<AppState>>, body: String) -> (StatusCode, String) {
+    let workflow_name = match serde_json::from_str::<RunInput>(&body) {
+        Ok(input) => input.workflow,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                serde_json::to_string(&ErrorOutput {
+                    error: format!("invalid request body: {}", e),
+                })
+                .unwrap(),
+            );
+        }
+    };
+
+    let (resp_tx, resp_rx) = oneshot::channel();
+    if state
+        .tx
+        .send(RunEvent::Run {
+            workflow_name,
+            respond_to: resp_tx,
+        })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::to_string(&ErrorOutput {
+                error: "daemon event loop is not running".to_string(),
+            })
+            .unwrap(),
+        );
+    }
+
+    match resp_rx.await {
+        Ok(Ok(output)) => (StatusCode::OK, serde_json::to_string(&output).unwrap()),
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            serde_json::to_string(&ErrorOutput { error: e }).unwrap(),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::to_string(&ErrorOutput {
+                error: "daemon did not respond".to_string(),
+            })
+            .unwrap(),
+        ),
+    }
+}
+
+async fn handle_stop(State(state): State<Arc<AppState>>) -> &'static str {
+    state.tx.send(RunEvent::Stop).await.ok();
+    "ok"
+}
+
 async fn handle_complete(
-    AxumPath(task_id): AxumPath<String>,
+    AxumPath((workflow_id, task_id)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> &'static str {
@@ -59,33 +133,51 @@ async fn handle_complete(
         .and_then(|b| b.summary);
     state
         .tx
-        .send(RunEvent::Complete { task_id, summary })
+        .send(RunEvent::Complete {
+            workflow_id,
+            task_id,
+            summary,
+        })
         .await
         .ok();
     "ok"
 }
 
 async fn handle_report(
-    AxumPath(task_id): AxumPath<String>,
+    AxumPath((workflow_id, task_id)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> &'static str {
-    state.tx.send(RunEvent::Report { task_id, body }).await.ok();
+    state
+        .tx
+        .send(RunEvent::Report {
+            workflow_id,
+            task_id,
+            body,
+        })
+        .await
+        .ok();
     "ok"
 }
 
-async fn handle_approve(State(state): State<Arc<AppState>>) -> &'static str {
-    state.tx.send(RunEvent::Approve).await.ok();
+async fn handle_approve(
+    AxumPath(workflow_id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> &'static str {
+    state.tx.send(RunEvent::Approve { workflow_id }).await.ok();
     "ok"
 }
 
-async fn handle_resume(State(state): State<Arc<AppState>>) -> &'static str {
-    state.tx.send(RunEvent::Resume).await.ok();
+async fn handle_resume(
+    AxumPath(workflow_id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> &'static str {
+    state.tx.send(RunEvent::Resume { workflow_id }).await.ok();
     "ok"
 }
 
 async fn handle_reject(
-    AxumPath(task_id): AxumPath<String>,
+    AxumPath((workflow_id, task_id)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> &'static str {
@@ -94,14 +186,18 @@ async fn handle_reject(
         .and_then(|b| b.reason);
     state
         .tx
-        .send(RunEvent::Reject { task_id, reason })
+        .send(RunEvent::Reject {
+            workflow_id,
+            task_id,
+            reason,
+        })
         .await
         .ok();
     "ok"
 }
 
 async fn handle_pause(
-    AxumPath(task_id): AxumPath<String>,
+    AxumPath((workflow_id, task_id)): AxumPath<(String, String)>,
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> &'static str {
@@ -110,15 +206,23 @@ async fn handle_pause(
         .and_then(|b| b.reason);
     state
         .tx
-        .send(RunEvent::Pause { task_id, reason })
+        .send(RunEvent::Pause {
+            workflow_id,
+            task_id,
+            reason,
+        })
         .await
         .ok();
     "ok"
 }
 
-pub async fn run_workflow(
+/// Starts the callback HTTP server and blocks, managing zero or more concurrent
+/// workflow instances. Workflows are added via `POST /run` and removed once they
+/// complete. The daemon keeps running (to accept further `/run` calls) until it
+/// receives `POST /stop` or the process is killed — it does NOT exit automatically
+/// when all tracked workflows finish.
+pub async fn run_daemon(
     cwd: PathBuf,
-    workflow_name: String,
     callback_port: u16,
     callback_url: String,
     webhook_url: String,
@@ -127,117 +231,148 @@ pub async fn run_workflow(
 
     let app_state = Arc::new(AppState { tx });
     let app = Router::new()
+        .route("/run", post(handle_run))
+        .route("/stop", post(handle_stop))
         // `*task_id` (not `:task_id`) because sub-agent task IDs contain a
         // literal `/` (e.g. "quality-check/run-test"); a single-segment
         // param would not match those paths.
-        .route("/complete/*task_id", post(handle_complete))
-        .route("/report/*task_id", post(handle_report))
-        .route("/approve", post(handle_approve))
-        .route("/resume", post(handle_resume))
-        .route("/reject/*task_id", post(handle_reject))
-        .route("/pause/*task_id", post(handle_pause))
+        .route("/complete/:workflow_id/*task_id", post(handle_complete))
+        .route("/report/:workflow_id/*task_id", post(handle_report))
+        .route("/approve/:workflow_id", post(handle_approve))
+        .route("/resume/:workflow_id", post(handle_resume))
+        .route("/reject/:workflow_id/*task_id", post(handle_reject))
+        .route("/pause/:workflow_id/*task_id", post(handle_pause))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", callback_port))
         .await
         .context("failed to bind callback server")?;
     eprintln!(
-        "[run] callback server listening on 127.0.0.1:{}",
+        "[serve] callback server listening on 127.0.0.1:{}",
         callback_port
     );
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
+    // Fail fast if config.yml is missing or invalid, before accepting any /run calls.
     let config = load_config(&cwd)?;
-    let wf = config
-        .workflows
-        .get(&workflow_name)
-        .with_context(|| format!("workflow '{}' not found in config.yml", workflow_name))?
-        .clone();
-
-    let state = crate::engine::state::WorkflowState::new(&workflow_name, &wf);
-    let workflow_id = state.workflow_id.clone();
-    store::save_state(&cwd, &state)?;
-    eprintln!(
-        "[run] workflow '{}' started (id: {})",
-        workflow_name, workflow_id
-    );
-
-    let mut dispatched: HashSet<String> = HashSet::new();
-
-    let initial = executor::build_next(&wf, &state, &config);
-    dispatch_tasks(
-        &cwd,
-        &initial.tasks,
-        &callback_url,
-        &webhook_url,
-        &workflow_id,
-        &mut dispatched,
-    )
-    .await?;
+    let mut running: HashMap<String, RunningWorkflow> = HashMap::new();
 
     loop {
         match rx.recv().await {
             None => break,
 
-            Some(RunEvent::Report { task_id, body }) => {
+            Some(RunEvent::Stop) => {
+                eprintln!("[serve] stop requested; shutting down");
+                break;
+            }
+
+            Some(RunEvent::Run {
+                workflow_name,
+                respond_to,
+            }) => {
+                let result = start_workflow(
+                    &cwd,
+                    &workflow_name,
+                    &config,
+                    &callback_url,
+                    &webhook_url,
+                    &mut running,
+                )
+                .await
+                .map_err(|e| e.to_string());
+                respond_to.send(result).ok();
+            }
+
+            Some(RunEvent::Report {
+                workflow_id,
+                task_id,
+                body,
+            }) => {
+                if !running.contains_key(&workflow_id) {
+                    eprintln!("[serve] /report for unknown workflow_id '{}'", workflow_id);
+                    continue;
+                }
                 if let Err(e) = record_report(&cwd, &workflow_id, &task_id, &body) {
-                    eprintln!("[run] report error for '{}': {}", task_id, e);
+                    eprintln!(
+                        "[serve] report error for '{}' (workflow {}): {}",
+                        task_id, workflow_id, e
+                    );
                 }
             }
 
-            Some(RunEvent::Complete { task_id, summary }) => {
-                dispatched.remove(&task_id);
-                eprintln!("[run] task '{}' completed", task_id);
+            Some(RunEvent::Complete {
+                workflow_id,
+                task_id,
+                summary,
+            }) => {
+                let Some(wf) = running.get(&workflow_id).map(|e| e.wf.clone()) else {
+                    eprintln!(
+                        "[serve] /complete for unknown workflow_id '{}'",
+                        workflow_id
+                    );
+                    continue;
+                };
+                if let Some(entry) = running.get_mut(&workflow_id) {
+                    entry.dispatched.remove(&task_id);
+                }
+                eprintln!("[serve] [{}] task '{}' completed", workflow_id, task_id);
 
                 let next_tasks =
                     complete_task(&cwd, &workflow_id, &task_id, summary, &wf, &config)?;
-
-                // Workflow finished or awaiting approval when next_tasks is None
                 if let Some(tasks) = next_tasks {
-                    dispatch_tasks(
-                        &cwd,
-                        &tasks,
-                        &callback_url,
-                        &webhook_url,
-                        &workflow_id,
-                        &mut dispatched,
-                    )
-                    .await?;
+                    if let Some(entry) = running.get_mut(&workflow_id) {
+                        dispatch_tasks(
+                            &cwd,
+                            &tasks,
+                            &callback_url,
+                            &webhook_url,
+                            &workflow_id,
+                            &mut entry.dispatched,
+                        )
+                        .await?;
+                    }
                 }
 
                 // Check if the workflow record was cleared (completed) or paused
                 match store::load_state_by_id(&cwd, &workflow_id)? {
                     None => {
-                        eprintln!("[run] workflow '{}' completed", workflow_name);
-                        break;
+                        eprintln!(
+                            "[serve] workflow '{}' (id: {}) completed",
+                            wf.name, workflow_id
+                        );
+                        running.remove(&workflow_id);
                     }
                     Some(_) => {
                         let wf_status = store::get_workflow_status(&cwd, &workflow_id)?;
                         if wf_status == "awaiting_approval" {
                             eprintln!(
-                                "[run] paused awaiting approval for task '{}'; \
-                                 POST /approve to approve or /reject/{} to retry",
-                                task_id, task_id
+                                "[serve] [{}] paused awaiting approval for task '{}'; \
+                                 POST /approve/{} to approve or /reject/{}/{} to retry",
+                                workflow_id, task_id, workflow_id, workflow_id, task_id
                             );
                         }
                     }
                 }
             }
 
-            Some(RunEvent::Approve) => {
+            Some(RunEvent::Approve { workflow_id }) => {
+                let Some(wf) = running.get(&workflow_id).map(|e| e.wf.clone()) else {
+                    eprintln!("[serve] /approve for unknown workflow_id '{}'", workflow_id);
+                    continue;
+                };
                 let wf_status = store::get_workflow_status(&cwd, &workflow_id)?;
                 if wf_status != "awaiting_approval" {
                     eprintln!(
-                        "[run] /approve called but workflow is not awaiting approval (status: {})",
-                        wf_status
+                        "[serve] /approve called but workflow '{}' is not awaiting approval (status: {})",
+                        workflow_id, wf_status
                     );
                     continue;
                 }
                 store::set_workflow_status(&cwd, &workflow_id, "active")?;
 
-                eprintln!("[run] approved; dispatching next tasks");
+                eprintln!("[serve] [{}] approved; dispatching next tasks", workflow_id);
 
                 let state = store::load_state_by_id(&cwd, &workflow_id)?
                     .context("workflow state not found after approval")?;
@@ -245,28 +380,35 @@ pub async fn run_workflow(
                 if matches!(next.status, FlowStatus::Completed) {
                     store::clear_state_by_id(&cwd, &workflow_id)?;
                     eprintln!(
-                        "[run] workflow '{}' completed after approval",
-                        workflow_name
+                        "[serve] workflow '{}' (id: {}) completed after approval",
+                        wf.name, workflow_id
                     );
-                    break;
+                    running.remove(&workflow_id);
+                    continue;
                 }
-                dispatch_tasks(
-                    &cwd,
-                    &next.tasks,
-                    &callback_url,
-                    &webhook_url,
-                    &workflow_id,
-                    &mut dispatched,
-                )
-                .await?;
+                if let Some(entry) = running.get_mut(&workflow_id) {
+                    dispatch_tasks(
+                        &cwd,
+                        &next.tasks,
+                        &callback_url,
+                        &webhook_url,
+                        &workflow_id,
+                        &mut entry.dispatched,
+                    )
+                    .await?;
+                }
             }
 
-            Some(RunEvent::Resume) => {
+            Some(RunEvent::Resume { workflow_id }) => {
+                let Some(wf) = running.get(&workflow_id).map(|e| e.wf.clone()) else {
+                    eprintln!("[serve] /resume for unknown workflow_id '{}'", workflow_id);
+                    continue;
+                };
                 let wf_status = store::get_workflow_status(&cwd, &workflow_id)?;
                 if wf_status != "paused" {
                     eprintln!(
-                        "[run] /resume called but workflow is not paused (status: {})",
-                        wf_status
+                        "[serve] /resume called but workflow '{}' is not paused (status: {})",
+                        workflow_id, wf_status
                     );
                     continue;
                 }
@@ -283,25 +425,43 @@ pub async fn run_workflow(
                     .filter(|(_, s)| s.status == StepStatus::InProgress)
                     .filter_map(|(id, _)| build_task_output(id, &wf, &config))
                     .collect();
-                for task in &in_progress {
-                    dispatched.remove(&task.task_id);
+                if let Some(entry) = running.get_mut(&workflow_id) {
+                    for task in &in_progress {
+                        entry.dispatched.remove(&task.task_id);
+                    }
                 }
-                eprintln!("[run] resumed; re-dispatching in-progress tasks");
-                dispatch_tasks(
-                    &cwd,
-                    &in_progress,
-                    &callback_url,
-                    &webhook_url,
-                    &workflow_id,
-                    &mut dispatched,
-                )
-                .await?;
+                eprintln!(
+                    "[serve] [{}] resumed; re-dispatching in-progress tasks",
+                    workflow_id
+                );
+                if let Some(entry) = running.get_mut(&workflow_id) {
+                    dispatch_tasks(
+                        &cwd,
+                        &in_progress,
+                        &callback_url,
+                        &webhook_url,
+                        &workflow_id,
+                        &mut entry.dispatched,
+                    )
+                    .await?;
+                }
             }
 
-            Some(RunEvent::Reject { task_id, reason }) => {
+            Some(RunEvent::Reject {
+                workflow_id,
+                task_id,
+                reason,
+            }) => {
+                let Some(wf) = running.get(&workflow_id).map(|e| e.wf.clone()) else {
+                    eprintln!("[serve] /reject for unknown workflow_id '{}'", workflow_id);
+                    continue;
+                };
                 let wf_status = store::get_workflow_status(&cwd, &workflow_id)?;
                 if wf_status != "awaiting_approval" {
-                    eprintln!("[run] /reject called but workflow is not awaiting approval");
+                    eprintln!(
+                        "[serve] /reject called but workflow '{}' is not awaiting approval",
+                        workflow_id
+                    );
                     continue;
                 }
 
@@ -324,24 +484,37 @@ pub async fn run_workflow(
                 }
                 store::set_workflow_status(&cwd, &workflow_id, "active")?;
                 store::save_state(&cwd, &state)?;
-                eprintln!("[run] task '{}' rejected; re-dispatching", task_id);
+                eprintln!(
+                    "[serve] [{}] task '{}' rejected; re-dispatching",
+                    workflow_id, task_id
+                );
 
                 let task_output = build_task_output(&task_id, &wf, &config);
                 if let Some(t) = task_output {
-                    dispatched.remove(&task_id);
-                    dispatch_tasks(
-                        &cwd,
-                        &[t],
-                        &callback_url,
-                        &webhook_url,
-                        &workflow_id,
-                        &mut dispatched,
-                    )
-                    .await?;
+                    if let Some(entry) = running.get_mut(&workflow_id) {
+                        entry.dispatched.remove(&task_id);
+                        dispatch_tasks(
+                            &cwd,
+                            &[t],
+                            &callback_url,
+                            &webhook_url,
+                            &workflow_id,
+                            &mut entry.dispatched,
+                        )
+                        .await?;
+                    }
                 }
             }
 
-            Some(RunEvent::Pause { task_id, reason }) => {
+            Some(RunEvent::Pause {
+                workflow_id,
+                task_id,
+                reason,
+            }) => {
+                if !running.contains_key(&workflow_id) {
+                    eprintln!("[serve] /pause for unknown workflow_id '{}'", workflow_id);
+                    continue;
+                }
                 store::set_workflow_status(&cwd, &workflow_id, "paused")?;
 
                 // Record the pause event in action_reports.
@@ -359,7 +532,8 @@ pub async fn run_workflow(
                 store::update_task_timestamp(&cwd, &workflow_id, &task_id).ok();
 
                 eprintln!(
-                    "[run] task '{}' paused — user input required: {}",
+                    "[serve] [{}] task '{}' paused — user input required: {}",
+                    workflow_id,
                     task_id,
                     reason.as_deref().unwrap_or("(no reason given)")
                 );
@@ -368,6 +542,54 @@ pub async fn run_workflow(
     }
 
     Ok(())
+}
+
+/// Creates a new workflow instance, persists its initial state, dispatches its
+/// first executable tasks, and registers it in `running`. Called from the `/run`
+/// event so a single daemon can host any number of concurrent workflow instances.
+async fn start_workflow(
+    cwd: &Path,
+    workflow_name: &str,
+    config: &Config,
+    callback_url: &str,
+    webhook_url: &str,
+    running: &mut HashMap<String, RunningWorkflow>,
+) -> Result<RunOutput> {
+    let wf = config
+        .workflows
+        .get(workflow_name)
+        .with_context(|| format!("workflow '{}' not found in config.yml", workflow_name))?
+        .clone();
+
+    let state = crate::engine::state::WorkflowState::new(workflow_name, &wf);
+    let workflow_id = state.workflow_id.clone();
+    store::save_state(cwd, &state)?;
+    eprintln!(
+        "[serve] workflow '{}' started (id: {})",
+        workflow_name, workflow_id
+    );
+
+    let mut entry = RunningWorkflow {
+        wf,
+        dispatched: HashSet::new(),
+    };
+    let initial = executor::build_next(&entry.wf, &state, config);
+    dispatch_tasks(
+        cwd,
+        &initial.tasks,
+        callback_url,
+        webhook_url,
+        &workflow_id,
+        &mut entry.dispatched,
+    )
+    .await?;
+
+    let workflow = workflow_name.to_string();
+    running.insert(workflow_id.clone(), entry);
+    Ok(RunOutput {
+        workflow_id,
+        workflow,
+    })
 }
 
 /// Marks a task as completed, enforces the gate check, handles the approval flag, and
@@ -502,7 +724,7 @@ async fn dispatch_tasks(
             "outputs": task.outputs,
             "deny": task.deny,
         });
-        eprintln!("[run] dispatching task '{}' to webhook", task.task_id);
+        eprintln!("[serve] dispatching task '{}' to webhook", task.task_id);
         client
             .post(webhook_url)
             .json(&payload)

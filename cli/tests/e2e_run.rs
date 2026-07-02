@@ -30,7 +30,7 @@
 //! workflows) — see `e2e_resume.rs` for the `/resume` + pause coverage.
 
 mod helpers;
-use helpers::{pick_free_port, MockWebhook, TempProject, CONFIG_MINIMAL};
+use helpers::{pick_free_port, wait_workflow_completed, MockWebhook, TempProject, CONFIG_MINIMAL};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -88,14 +88,16 @@ fn run_dispatches_initial_tasks() {
 
 // ── 9-2 ───────────────────────────────────────────────────────────────────────
 
-/// A two-task linear workflow must complete (process exits 0) when each task
-/// is acknowledged with a /complete callback.
+/// A two-task linear workflow must complete (cleared from the store) when
+/// each task is acknowledged with a /complete callback. The `serve` daemon
+/// itself keeps running afterward (no auto-exit), so completion is observed
+/// via `status`, not process exit.
 #[test]
 fn run_linear_workflow_completes() {
     let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_TWO_STEP);
     let cb_port = pick_free_port();
-    let mut proc = proj.start_run("two-step", cb_port, &webhook.url());
+    let proc = proj.start_run("two-step", cb_port, &webhook.url());
 
     webhook.wait_for_n(1, TIMEOUT);
     proc.complete("step-a");
@@ -103,11 +105,7 @@ fn run_linear_workflow_completes() {
     webhook.wait_for_n(2, TIMEOUT);
     proc.complete("step-b");
 
-    let status = proc.wait_exit(TIMEOUT);
-    assert!(
-        status.success(),
-        "workflow-runner run must exit 0 when all tasks complete"
-    );
+    wait_workflow_completed(&proj, &proc.workflow_id, TIMEOUT);
 }
 
 // ── 9-3 ───────────────────────────────────────────────────────────────────────
@@ -182,7 +180,7 @@ fn run_approve_approves_and_resumes_dispatch() {
     let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_APPROVAL_RUN);
     let cb_port = pick_free_port();
-    let mut proc = proj.start_run("approve-run", cb_port, &webhook.url());
+    let proc = proj.start_run("approve-run", cb_port, &webhook.url());
 
     webhook.wait_for_n(1, TIMEOUT);
     proc.complete("work");
@@ -199,13 +197,9 @@ fn run_approve_approves_and_resumes_dispatch() {
         "finish must be dispatched after /approve"
     );
 
-    // Complete the final task → workflow exits
+    // Complete the final task → workflow finishes (cleared from the store)
     proc.complete("finish");
-    let status = proc.wait_exit(TIMEOUT);
-    assert!(
-        status.success(),
-        "workflow must complete successfully after approval"
-    );
+    wait_workflow_completed(&proj, &proc.workflow_id, TIMEOUT);
 }
 
 // ── 9-6 ───────────────────────────────────────────────────────────────────────
@@ -276,7 +270,7 @@ fn run_custom_callback_port_binds_correctly() {
     let cb_port = pick_free_port();
 
     // cb_port is OS-assigned (not the default 8789)
-    let mut proc = proj.start_run("two-step", cb_port, &webhook.url());
+    let proc = proj.start_run("two-step", cb_port, &webhook.url());
 
     webhook.wait_for_n(1, TIMEOUT);
     proc.complete("step-a"); // succeeds only if callback server is on cb_port
@@ -284,8 +278,7 @@ fn run_custom_callback_port_binds_correctly() {
     webhook.wait_for_n(2, TIMEOUT);
     proc.complete("step-b");
 
-    let status = proc.wait_exit(TIMEOUT);
-    assert!(status.success());
+    wait_workflow_completed(&proj, &proc.workflow_id, TIMEOUT);
 }
 
 // ── 9-9 ───────────────────────────────────────────────────────────────────────
@@ -300,18 +293,24 @@ fn run_callback_url_option_sets_payload_url() {
 
     // Use only --callback-url (conflicts with --callback-port so cannot combine).
     // The callback server binds on the default port 8789; only the payload URL differs.
-    let mut child = proj.run_background(&[
-        "run",
-        "two-step",
+    let mut daemon = proj.run_background(&[
+        "serve",
         "--callback-url",
         custom_url,
         "--webhook-url",
         &webhook.url(),
     ]);
 
+    let out = proj.run_retrying(&["run", "two-step"], TIMEOUT);
+    assert!(
+        out.status.success(),
+        "run must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
     let dispatched = webhook.wait_for_n(1, TIMEOUT);
-    child.kill().ok();
-    child.wait().ok();
+    daemon.kill().ok();
+    daemon.wait().ok();
 
     assert_eq!(
         dispatched[0]["callback_url"].as_str(),
@@ -380,18 +379,27 @@ fn run_webhook_port_constructs_url() {
     let proj = TempProject::new(CONFIG_TWO_STEP);
     let cb_port = pick_free_port();
 
-    let mut child = proj.run_background(&[
-        "run",
-        "two-step",
+    let mut daemon = proj.run_background(&[
+        "serve",
         "--callback-port",
         &cb_port.to_string(),
         "--webhook-port",
         &webhook.port.to_string(),
     ]);
 
+    let out = proj.run_retrying(
+        &["run", "two-step", "--callback-port", &cb_port.to_string()],
+        TIMEOUT,
+    );
+    assert!(
+        out.status.success(),
+        "run must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
     let dispatched = webhook.wait_for_n(1, TIMEOUT);
-    child.kill().ok();
-    child.wait().ok();
+    daemon.kill().ok();
+    daemon.wait().ok();
 
     assert!(
         !dispatched.is_empty(),
@@ -423,13 +431,13 @@ fn run_callback_port_and_callback_url_conflict() {
 // ── 9-13 ──────────────────────────────────────────────────────────────────────
 
 /// Specifying both `--webhook-port` and `--webhook-url` must be rejected by
-/// clap (they are mutually exclusive).
+/// clap (they are mutually exclusive). These flags live on `serve` (which owns
+/// the webhook connection), not on the `run` thin client.
 #[test]
 fn run_webhook_port_and_webhook_url_conflict() {
     let proj = TempProject::new(CONFIG_MINIMAL);
     let out = proj.run(&[
-        "run",
-        "simple",
+        "serve",
         "--webhook-port",
         "9002",
         "--webhook-url",
@@ -443,21 +451,33 @@ fn run_webhook_port_and_webhook_url_conflict() {
 
 // ── 9-14 ──────────────────────────────────────────────────────────────────────
 
-/// Passing a workflow name that does not exist in config.yml must exit 1 and
-/// include the unknown name in the error message.
+/// Passing a workflow name that does not exist in config.yml must make `run`
+/// exit 1 and include the unknown name in the error message. The error now
+/// comes back from the `serve` daemon's `POST /run` response (400), not from
+/// `run` itself, since `run` is a thin HTTP client.
 #[test]
 fn run_unknown_workflow_exits_with_error() {
+    let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_TWO_STEP);
     let cb_port = pick_free_port();
-    // webhook is never contacted because the process exits before dispatching
-    let out = proj.run(&[
-        "run",
-        "no-such-workflow",
+    // webhook is never contacted because the daemon rejects the /run before dispatching
+    let mut daemon = proj.run_background(&[
+        "serve",
         "--callback-port",
         &cb_port.to_string(),
         "--webhook-url",
-        "http://127.0.0.1:1",
+        &webhook.url(),
     ]);
+
+    let out = proj.run_retrying(
+        &[
+            "run",
+            "no-such-workflow",
+            "--callback-port",
+            &cb_port.to_string(),
+        ],
+        TIMEOUT,
+    );
 
     assert!(!out.status.success(), "unknown workflow must exit non-zero");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -465,26 +485,34 @@ fn run_unknown_workflow_exits_with_error() {
         stderr.contains("no-such-workflow"),
         "error must mention the unknown workflow name: got '{stderr}'"
     );
+    daemon.kill().ok();
+    daemon.wait().ok();
 }
 
 // ── 9-15 ──────────────────────────────────────────────────────────────────────
 
-/// When the Channels webhook server is not reachable, `workflow-runner run`
-/// must exit 1 with an error that mentions the webhook.
+/// When the Channels webhook server is not reachable, `run` must exit 1 with
+/// an error that mentions the webhook. The failure now surfaces from the
+/// `serve` daemon's `POST /run` response (dispatching the initial tasks fails),
+/// forwarded back through the `run` thin client.
 #[test]
 fn run_webhook_unavailable_exits_with_error() {
     let proj = TempProject::new(CONFIG_TWO_STEP);
     let cb_port = pick_free_port();
     let dead_port = pick_free_port(); // nothing is listening here
 
-    let out = proj.run(&[
-        "run",
-        "two-step",
+    let mut daemon = proj.run_background(&[
+        "serve",
         "--callback-port",
         &cb_port.to_string(),
         "--webhook-url",
         &format!("http://127.0.0.1:{dead_port}"),
     ]);
+
+    let out = proj.run_retrying(
+        &["run", "two-step", "--callback-port", &cb_port.to_string()],
+        TIMEOUT,
+    );
 
     assert!(
         !out.status.success(),
@@ -495,6 +523,8 @@ fn run_webhook_unavailable_exits_with_error() {
         stderr.contains("webhook"),
         "error must mention 'webhook': got '{stderr}'"
     );
+    daemon.kill().ok();
+    daemon.wait().ok();
 }
 
 // ── 9-16 ──────────────────────────────────────────────────────────────────────
@@ -507,7 +537,7 @@ fn run_complete_unknown_task_is_gated_not_a_crash() {
     let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_TWO_STEP);
     let cb_port = pick_free_port();
-    let mut proc = proj.start_run("two-step", cb_port, &webhook.url());
+    let proc = proj.start_run("two-step", cb_port, &webhook.url());
 
     webhook.wait_for_n(1, TIMEOUT); // step-a dispatched
 
@@ -525,9 +555,5 @@ fn run_complete_unknown_task_is_gated_not_a_crash() {
     proc.complete("step-a");
     webhook.wait_for_n(2, TIMEOUT);
     proc.complete("step-b");
-    let status = proc.wait_exit(TIMEOUT);
-    assert!(
-        status.success(),
-        "the daemon must still complete the workflow normally afterward"
-    );
+    wait_workflow_completed(&proj, &proc.workflow_id, TIMEOUT);
 }

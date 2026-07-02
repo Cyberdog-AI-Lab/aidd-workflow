@@ -346,6 +346,33 @@ pub fn update_task_timestamp(cwd: &Path, workflow_id: &str, task_id: &str) -> Re
     Ok(())
 }
 
+/// Resolves the single workflow_id in `cwd` whose status matches `status`.
+/// Returns `Ok(None)` if none match, `Ok(Some(id))` if exactly one matches,
+/// and an error listing all candidates if more than one matches.
+///
+/// Used by `approve`/`resume`/`reject` CLI commands to auto-select a target
+/// workflow when `--workflow-id` is omitted.
+pub fn find_workflow_id_by_status(cwd: &Path, status: &str) -> Result<Option<String>> {
+    let conn = open_db(cwd)?;
+    let cwd_str = normalize_cwd(cwd)?;
+
+    let mut stmt =
+        conn.prepare("SELECT workflow_id FROM workflow_runs WHERE cwd = ?1 AND status = ?2")?;
+    let ids: Vec<String> = stmt
+        .query_map(params![cwd_str, status], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    match ids.len() {
+        0 => Ok(None),
+        1 => Ok(Some(ids[0].clone())),
+        _ => anyhow::bail!(
+            "multiple workflows with status '{}' found; use --workflow-id to specify one\n  {}",
+            status,
+            ids.join("\n  ")
+        ),
+    }
+}
+
 /// Marks the single active workflow as completed.
 #[allow(dead_code)]
 pub fn clear_state(cwd: &Path) -> Result<()> {
@@ -500,6 +527,72 @@ mod tests {
         assert_eq!(get_workflow_status(cwd, &id).unwrap(), "awaiting_approval");
         set_workflow_status(cwd, &id, "active").unwrap();
         assert_eq!(get_workflow_status(cwd, &id).unwrap(), "active");
+    }
+
+    #[test]
+    fn find_workflow_id_by_status_returns_none_when_no_match() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+
+        let wf = minimal_workflow();
+        let state = WorkflowState::new("test", &wf);
+        save_state(cwd, &state).unwrap();
+
+        let result = find_workflow_id_by_status(cwd, "paused").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_workflow_id_by_status_returns_single_match() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+
+        let wf = minimal_workflow();
+        let state = WorkflowState::new("test", &wf);
+        let id = state.workflow_id.clone();
+        save_state(cwd, &state).unwrap();
+        set_workflow_status(cwd, &id, "paused").unwrap();
+
+        let result = find_workflow_id_by_status(cwd, "paused").unwrap();
+        assert_eq!(result, Some(id));
+    }
+
+    #[test]
+    fn find_workflow_id_by_status_errors_on_multiple_matches() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+
+        let wf = minimal_workflow();
+        let state1 = WorkflowState::new("test", &wf);
+        let state2 = WorkflowState::new("test", &wf);
+        let id1 = state1.workflow_id.clone();
+        let id2 = state2.workflow_id.clone();
+        save_state(cwd, &state1).unwrap();
+        save_state(cwd, &state2).unwrap();
+        set_workflow_status(cwd, &id1, "paused").unwrap();
+        set_workflow_status(cwd, &id2, "paused").unwrap();
+
+        let err = find_workflow_id_by_status(cwd, "paused").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(&id1));
+        assert!(msg.contains(&id2));
+    }
+
+    #[test]
+    fn find_workflow_id_by_status_ignores_other_statuses() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+
+        let wf = minimal_workflow();
+        let state1 = WorkflowState::new("test", &wf); // stays 'active'
+        let state2 = WorkflowState::new("test", &wf);
+        let id2 = state2.workflow_id.clone();
+        save_state(cwd, &state1).unwrap();
+        save_state(cwd, &state2).unwrap();
+        set_workflow_status(cwd, &id2, "paused").unwrap();
+
+        let result = find_workflow_id_by_status(cwd, "paused").unwrap();
+        assert_eq!(result, Some(id2));
     }
 
     #[test]

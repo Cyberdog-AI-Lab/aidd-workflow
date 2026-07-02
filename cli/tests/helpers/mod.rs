@@ -255,6 +255,30 @@ impl TempProject {
             .expect("failed to wait for workflow-runner")
     }
 
+    /// Retries `workflow-runner <args...>` (typically a `run` thin-client call)
+    /// until it either succeeds or fails for a reason other than "daemon
+    /// unreachable", tolerating the short window between spawning `serve` in
+    /// the background and its HTTP listener accepting connections.
+    ///
+    /// Only connection failures are retried — a legitimate application-level
+    /// error (e.g. an unknown workflow name) is returned immediately.
+    pub fn run_retrying(&self, args: &[&str], timeout: Duration) -> Output {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let out = self.run(args);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if out.status.success() || !stderr.contains("is `workflow-runner serve` running?") {
+                return out;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "workflow-runner {:?} kept failing to reach the daemon within {timeout:?}",
+                args
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     // ── Assertion helpers ─────────────────────────────────────────────────────
 
     /// Assert exit code 0 and parse stdout as JSON.
@@ -305,7 +329,7 @@ impl TempProject {
     // ── Workflow shortcut helpers ─────────────────────────────────────────────
 
     /// `workflow-runner approve --callback-port <port>` → parsed JSON.
-    /// Exercises the CLI wrapper itself (HTTP POST to a running `run` daemon),
+    /// Exercises the CLI wrapper itself (HTTP POST to a running `serve` daemon),
     /// as opposed to `RunningProcess::approve()` which POSTs directly.
     pub fn approve_cli(&self, callback_port: u16) -> serde_json::Value {
         self.assert_ok(&["approve", "--callback-port", &callback_port.to_string()])
@@ -543,14 +567,23 @@ impl MockWebhook {
 
 // ── RunningProcess ────────────────────────────────────────────────────────────
 
-/// A running `workflow-runner run` background process.
-/// Provides helpers for driving the workflow via HTTP callbacks.
+/// A running `workflow-runner serve` background process.
+/// Provides helpers for driving workflows via HTTP callbacks.
 /// The child process is killed when this value is dropped.
+///
+/// `workflow_id` holds the "primary" workflow this process was started with
+/// (via `TempProject::start_run`); the ambient methods (`complete`, `approve`,
+/// etc.) target it implicitly so existing single-workflow tests need no
+/// changes. For multi-workflow tests, use the `_for` variants or
+/// `start_workflow` to add further workflows to the same daemon.
 pub struct RunningProcess {
     child: std::process::Child,
     /// Port that the callback HTTP server is listening on.
     pub callback_port: u16,
     client: reqwest::blocking::Client,
+    /// The workflow_id this process was started with (empty if started via
+    /// `start_daemon` with no initial workflow).
+    pub workflow_id: String,
 }
 
 impl RunningProcess {
@@ -569,57 +602,156 @@ impl RunningProcess {
             .unwrap_or_else(|e| panic!("RunningProcess: failed to POST {path} with body: {e}"));
     }
 
-    /// `POST /complete/<task_id>`.
-    pub fn complete(&self, task_id: &str) {
-        self.post(&format!("/complete/{task_id}"));
+    /// `POST /run` on this already-running daemon to start an additional
+    /// workflow. Returns the newly assigned `workflow_id`.
+    ///
+    /// Retries briefly to tolerate the short window between spawning `serve`
+    /// and its HTTP listener accepting connections.
+    pub fn start_workflow(&self, workflow: &str) -> String {
+        let url = format!("http://127.0.0.1:{}/run", self.callback_port);
+        let body = serde_json::json!({ "workflow": workflow });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let resp = loop {
+            match self.client.post(&url).json(&body).send() {
+                Ok(resp) => break resp,
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        panic!("RunningProcess: failed to POST /run after retrying: {e}");
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        };
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        assert!(
+            status.is_success(),
+            "RunningProcess: POST /run for '{workflow}' failed ({status}): {text}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+            panic!("RunningProcess: /run response is not valid JSON: {e}\nraw: {text}")
+        });
+        json["workflow_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("RunningProcess: /run response missing workflow_id: {text}"))
+            .to_string()
     }
 
-    /// `POST /report/<task_id>` with `{"summary": ...}` body.
+    /// `POST /stop` — asks the daemon to shut down gracefully.
+    pub fn stop(&self) {
+        self.post("/stop");
+    }
+
+    /// `POST /complete/<workflow_id>/<task_id>` for this process's primary workflow.
+    pub fn complete(&self, task_id: &str) {
+        self.complete_for(&self.workflow_id, task_id);
+    }
+
+    /// `POST /complete/<workflow_id>/<task_id>` for an explicit workflow_id.
+    pub fn complete_for(&self, workflow_id: &str, task_id: &str) {
+        self.post(&format!("/complete/{workflow_id}/{task_id}"));
+    }
+
+    /// `POST /report/<workflow_id>/<task_id>` with `{"summary": ...}` body, for
+    /// this process's primary workflow.
     pub fn report(&self, task_id: &str, summary: &str) {
+        self.report_for(&self.workflow_id, task_id, summary);
+    }
+
+    /// `POST /report/<workflow_id>/<task_id>` with `{"summary": ...}` body, for
+    /// an explicit workflow_id.
+    pub fn report_for(&self, workflow_id: &str, task_id: &str, summary: &str) {
         self.post_json(
-            &format!("/report/{task_id}"),
+            &format!("/report/{workflow_id}/{task_id}"),
             serde_json::json!({ "summary": summary }),
         );
     }
 
-    /// `POST /approve` — approves the current `awaiting_approval` task.
+    /// `POST /approve/<workflow_id>` for this process's primary workflow.
     pub fn approve(&self) {
-        self.post("/approve");
+        self.approve_for(&self.workflow_id);
     }
 
-    /// `POST /resume` — resumes a `paused` workflow, re-dispatching in-progress tasks.
+    /// `POST /approve/<workflow_id>` for an explicit workflow_id.
+    pub fn approve_for(&self, workflow_id: &str) {
+        self.post(&format!("/approve/{workflow_id}"));
+    }
+
+    /// `POST /resume/<workflow_id>` for this process's primary workflow.
     pub fn resume(&self) {
-        self.post("/resume");
+        self.resume_for(&self.workflow_id);
     }
 
-    /// `POST /reject/<task_id>`.
+    /// `POST /resume/<workflow_id>` for an explicit workflow_id.
+    pub fn resume_for(&self, workflow_id: &str) {
+        self.post(&format!("/resume/{workflow_id}"));
+    }
+
+    /// `POST /reject/<workflow_id>/<task_id>` for this process's primary workflow.
     pub fn reject(&self, task_id: &str) {
-        self.post(&format!("/reject/{task_id}"));
+        self.reject_for(&self.workflow_id, task_id);
     }
 
-    /// `POST /reject/<task_id>` with `{"reason": ...}` body.
+    /// `POST /reject/<workflow_id>/<task_id>` for an explicit workflow_id.
+    pub fn reject_for(&self, workflow_id: &str, task_id: &str) {
+        self.post(&format!("/reject/{workflow_id}/{task_id}"));
+    }
+
+    /// `POST /reject/<workflow_id>/<task_id>` with `{"reason": ...}` body, for
+    /// this process's primary workflow.
     pub fn reject_with_reason(&self, task_id: &str, reason: &str) {
+        self.reject_with_reason_for(&self.workflow_id, task_id, reason);
+    }
+
+    /// `POST /reject/<workflow_id>/<task_id>` with `{"reason": ...}` body, for
+    /// an explicit workflow_id.
+    pub fn reject_with_reason_for(&self, workflow_id: &str, task_id: &str, reason: &str) {
         self.post_json(
-            &format!("/reject/{task_id}"),
+            &format!("/reject/{workflow_id}/{task_id}"),
             serde_json::json!({ "reason": reason }),
         );
     }
 
-    /// `POST /pause/<task_id>`.
+    /// `POST /pause/<workflow_id>/<task_id>` for this process's primary workflow.
     pub fn pause(&self, task_id: &str) {
-        self.post(&format!("/pause/{task_id}"));
+        self.pause_for(&self.workflow_id, task_id);
     }
 
-    /// `POST /pause/<task_id>` with `{"reason": ...}` body.
+    /// `POST /pause/<workflow_id>/<task_id>` for an explicit workflow_id.
+    pub fn pause_for(&self, workflow_id: &str, task_id: &str) {
+        self.post(&format!("/pause/{workflow_id}/{task_id}"));
+    }
+
+    /// `POST /pause/<workflow_id>/<task_id>` with `{"reason": ...}` body, for
+    /// this process's primary workflow.
     pub fn pause_with_reason(&self, task_id: &str, reason: &str) {
+        self.pause_with_reason_for(&self.workflow_id, task_id, reason);
+    }
+
+    /// `POST /pause/<workflow_id>/<task_id>` with `{"reason": ...}` body, for
+    /// an explicit workflow_id.
+    pub fn pause_with_reason_for(&self, workflow_id: &str, task_id: &str, reason: &str) {
         self.post_json(
-            &format!("/pause/{task_id}"),
+            &format!("/pause/{workflow_id}/{task_id}"),
             serde_json::json!({ "reason": reason }),
         );
+    }
+
+    /// Non-blocking check of whether the process has exited.
+    /// Returns `Some(status)` if it has, `None` if it is still running.
+    pub fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
+        self.child
+            .try_wait()
+            .unwrap_or_else(|e| panic!("RunningProcess: error checking exit status: {e}"))
     }
 
     /// Block until the process exits and return its exit status.
     /// Kills the process and panics if `timeout` elapses first.
+    ///
+    /// Note: `serve` no longer exits automatically when its tracked workflows
+    /// complete — only `POST /stop` or killing the process ends it. Use this
+    /// after calling `stop()`, or use `wait_workflow_completed` to assert a
+    /// workflow finished without expecting the daemon itself to exit.
     pub fn wait_exit(&mut self, timeout: Duration) -> std::process::ExitStatus {
         let deadline = Instant::now() + timeout;
         loop {
@@ -630,7 +762,7 @@ impl RunningProcess {
             }
             if Instant::now() >= deadline {
                 self.child.kill().ok();
-                panic!("RunningProcess: timeout waiting for workflow-runner run to exit");
+                panic!("RunningProcess: timeout waiting for workflow-runner serve to exit");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -647,8 +779,10 @@ impl Drop for RunningProcess {
 // ── TempProject run extensions ────────────────────────────────────────────────
 
 impl TempProject {
-    /// Spawn `workflow-runner run <workflow>` in the background with a specific
-    /// callback port and webhook URL.
+    /// Spawn `workflow-runner serve` in the background, then start `workflow`
+    /// on it via `POST /run`. The returned `RunningProcess.workflow_id` is set
+    /// to the newly assigned id, so `complete()`/`approve()`/etc. work without
+    /// an explicit workflow_id — existing single-workflow tests need no changes.
     ///
     /// Use `pick_free_port()` for `callback_port` and `MockWebhook::url()` for
     /// `webhook_url` to avoid port conflicts between parallel tests.
@@ -658,20 +792,32 @@ impl TempProject {
         callback_port: u16,
         webhook_url: &str,
     ) -> RunningProcess {
+        let mut proc = self.start_daemon(callback_port, webhook_url);
+        proc.workflow_id = proc.start_workflow(workflow);
+        proc
+    }
+
+    /// Spawn `workflow-runner serve` in the background with a specific callback
+    /// port and webhook URL, without starting any workflow. Use
+    /// `RunningProcess::start_workflow` to add one (or several) afterward.
+    /// Useful for multi-workflow tests and negative tests (e.g. an unknown
+    /// workflow name).
+    pub fn start_daemon(&self, callback_port: u16, webhook_url: &str) -> RunningProcess {
         let child = Command::new(binary_path())
             .arg("--cwd")
             .arg(self.path())
-            .args(["run", workflow])
+            .arg("serve")
             .args(["--callback-port", &callback_port.to_string()])
             .args(["--webhook-url", webhook_url])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .unwrap_or_else(|e| panic!("start_run: failed to spawn workflow-runner: {e}"));
+            .unwrap_or_else(|e| panic!("start_daemon: failed to spawn workflow-runner: {e}"));
         RunningProcess {
             child,
             callback_port,
             client: reqwest::blocking::Client::new(),
+            workflow_id: String::new(),
         }
     }
 
@@ -687,4 +833,26 @@ impl TempProject {
             .spawn()
             .unwrap_or_else(|e| panic!("run_background: failed to spawn workflow-runner: {e}"))
     }
+}
+
+// ── Workflow-completion polling ───────────────────────────────────────────────
+
+/// Polls `status --workflow-id <id>` until it fails (the workflow is no longer
+/// active/paused/awaiting_approval — i.e. it completed and was cleared from the
+/// store), or panics after `timeout`.
+///
+/// Use this instead of `RunningProcess::wait_exit` to assert a workflow
+/// finished: `serve` no longer exits automatically when its tracked workflows
+/// complete, so process exit is not a valid completion signal anymore.
+pub fn wait_workflow_completed(proj: &TempProject, workflow_id: &str, timeout: Duration) {
+    // `--workflow-id` is a global flag defined on the top-level `Cli` struct,
+    // so it must precede the subcommand: `--workflow-id <id> status`, not
+    // `status --workflow-id <id>` (the latter is rejected by clap outright,
+    // which would make this check vacuously true on the first poll).
+    wait_until(timeout, || {
+        !proj
+            .run(&["--workflow-id", workflow_id, "status"])
+            .status
+            .success()
+    });
 }

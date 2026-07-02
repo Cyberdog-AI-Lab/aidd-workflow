@@ -45,10 +45,15 @@ When a task instruction arrives, the channel body is a JSON object:
 - If \`agents\` is a non-empty list (and \`prompt\` is null), spawn each named
   custom agent (\`.claude/agents/<name>.md\`) in parallel via the Agent tool.
   Each agent reports its own completion by calling /complete on
-  \`{task_id}/{agent_name}\` (see step 4). Only call /complete on the bare
-  \`task_id\` once every agent has finished.
+  \`{workflow_id}/{task_id}/{agent_name}\` (see step 4). Only call /complete on
+  the bare \`{workflow_id}/{task_id}\` once every agent has finished.
 - If \`skills\` is a non-empty list, invoke each named skill via the Skill tool
   (in addition to \`prompt\`, if also present).
+
+Note: a single \`workflow-runner serve\` daemon may run multiple workflows
+concurrently. Always read \`workflow_id\` from the dispatch payload and include
+it in every callback URL below — never hardcode or reuse a \`workflow_id\` seen
+in an earlier dispatch, since each workflow instance has its own.
 
 ## How to handle a task instruction
 
@@ -58,7 +63,7 @@ When a task instruction arrives, the channel body is a JSON object:
 4. When the work is fully complete, call /complete with a brief summary:
 
 \`\`\`bash
-curl -sX POST {callback_url}/complete/{task_id} \\
+curl -sX POST {callback_url}/complete/{workflow_id}/{task_id} \\
   -H 'Content-Type: application/json' \\
   -d '{"summary":"implemented X, all tests passed"}'
 \`\`\`
@@ -66,7 +71,7 @@ curl -sX POST {callback_url}/complete/{task_id} \\
 5. Optionally report progress mid-task with a brief summary:
 
 \`\`\`bash
-curl -sX POST {callback_url}/report/{task_id} \\
+curl -sX POST {callback_url}/report/{workflow_id}/{task_id} \\
   -H 'Content-Type: application/json' \\
   -d '{"summary":"ran tests, 12 passed"}'
 \`\`\`
@@ -77,7 +82,7 @@ Do NOT use /report to signal start or end of the task — use /complete for the 
 6. If you must pause to ask the user a question before continuing, notify the orchestrator:
 
 \`\`\`bash
-curl -sX POST {callback_url}/pause/{task_id} \\
+curl -sX POST {callback_url}/pause/{workflow_id}/{task_id} \\
   -H 'Content-Type: application/json' \\
   -d '{"reason":"need clarification on which file to modify"}'
 \`\`\`

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use adapters::hooks::hook_handler;
 use config::loader::{load_and_merge_config, load_config, validate as validate_config};
 use engine::state::WorkflowState;
-use engine::store::{load_state, load_state_by_id};
+use engine::store::{find_workflow_id_by_status, load_state, load_state_by_id};
 use protocol::output::{
     build_status, format_status_table, format_validate_text, ErrorOutput, ValidateOutput,
     WorkflowListItem,
@@ -40,9 +40,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run a workflow end-to-end as a daemon (dispatches tasks via Channels webhook, awaits HTTP callbacks).
-    Run {
-        workflow: String,
+    /// Start the callback/orchestrator daemon (binds the HTTP server, awaits callbacks).
+    /// Starts with zero workflows running; use `run` to start one on it.
+    Serve {
         /// Port for the local callback HTTP server (conflicts with --callback-url) [default: 8789].
         #[arg(long, conflicts_with = "callback_url")]
         callback_port: Option<u16>,
@@ -57,8 +57,31 @@ enum Commands {
         #[arg(long, conflicts_with = "webhook_port")]
         webhook_url: Option<String>,
     },
-    /// Approve an awaiting-approval task on a running `workflow-runner run` daemon
-    /// (POST /approve on its callback server).
+    /// Start a workflow on a running `workflow-runner serve` daemon
+    /// (POST /run on its callback server). Prints the newly assigned workflow_id.
+    /// Call it multiple times to run several workflows concurrently on one daemon.
+    Run {
+        workflow: String,
+        /// Port of the running daemon's callback server (conflicts with --callback-url) [default: 8789].
+        #[arg(long, conflicts_with = "callback_url")]
+        callback_port: Option<u16>,
+        /// Full callback base URL of the running daemon (conflicts with --callback-port).
+        #[arg(long, conflicts_with = "callback_port")]
+        callback_url: Option<String>,
+    },
+    /// Stop a running `workflow-runner serve` daemon (POST /stop on its callback server).
+    Stop {
+        /// Port of the running daemon's callback server (conflicts with --callback-url) [default: 8789].
+        #[arg(long, conflicts_with = "callback_url")]
+        callback_port: Option<u16>,
+        /// Full callback base URL of the running daemon (conflicts with --callback-port).
+        #[arg(long, conflicts_with = "callback_port")]
+        callback_url: Option<String>,
+    },
+    /// Approve an awaiting-approval workflow on a running `workflow-runner serve` daemon
+    /// (POST /approve/:workflow_id on its callback server). Uses the global --workflow-id
+    /// if given; otherwise auto-selects the single awaiting-approval workflow, erroring
+    /// if there is more than one.
     Approve {
         /// Port of the running daemon's callback server (conflicts with --callback-url) [default: 8789].
         #[arg(long, conflicts_with = "callback_url")]
@@ -67,8 +90,10 @@ enum Commands {
         #[arg(long, conflicts_with = "callback_port")]
         callback_url: Option<String>,
     },
-    /// Resume a paused task (e.g. after an agent called `pause`) on a running
-    /// `workflow-runner run` daemon (POST /resume on its callback server).
+    /// Resume a paused workflow (e.g. after an agent called `pause`) on a running
+    /// `workflow-runner serve` daemon (POST /resume/:workflow_id on its callback server).
+    /// Uses the global --workflow-id if given; otherwise auto-selects the single paused
+    /// workflow, erroring if there is more than one.
     Resume {
         /// Port of the running daemon's callback server (conflicts with --callback-url) [default: 8789].
         #[arg(long, conflicts_with = "callback_url")]
@@ -78,7 +103,9 @@ enum Commands {
         callback_url: Option<String>,
     },
     /// Reject an awaiting-approval task and retry it, on a running
-    /// `workflow-runner run` daemon (POST /reject/:task_id on its callback server).
+    /// `workflow-runner serve` daemon (POST /reject/:workflow_id/:task_id on its
+    /// callback server). Uses the global --workflow-id if given; otherwise auto-selects
+    /// the single awaiting-approval workflow, erroring if there is more than one.
     Reject {
         task_id: String,
         /// Developer feedback explaining the rejection.
@@ -141,41 +168,42 @@ fn main() {
 
 fn run(cmd: Commands, cwd: &Path, workflow_id: Option<&str>) -> Result<String> {
     match cmd {
-        Commands::Run {
-            workflow,
+        Commands::Serve {
             callback_port,
             callback_url,
             webhook_port,
             webhook_url,
-        } => {
-            let cb_port = callback_port.unwrap_or(8789);
-            let cb_url = callback_url.unwrap_or_else(|| format!("http://127.0.0.1:{}", cb_port));
-            let wh_port = webhook_port.unwrap_or(8788);
-            let wh_url = webhook_url.unwrap_or_else(|| format!("http://127.0.0.1:{}", wh_port));
-            let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-            rt.block_on(cmd::run::run_workflow(
-                cwd.to_path_buf(),
-                workflow,
-                cb_port,
-                cb_url,
-                wh_url,
-            ))?;
-            Ok(String::new())
-        }
+        } => cmd_serve(cwd, callback_port, callback_url, webhook_port, webhook_url),
+        Commands::Run {
+            workflow,
+            callback_port,
+            callback_url,
+        } => cmd_run(&workflow, callback_port, callback_url),
+        Commands::Stop {
+            callback_port,
+            callback_url,
+        } => cmd_stop(callback_port, callback_url),
         Commands::Approve {
             callback_port,
             callback_url,
-        } => cmd_approve(callback_port, callback_url),
+        } => cmd_approve(cwd, workflow_id, callback_port, callback_url),
         Commands::Resume {
             callback_port,
             callback_url,
-        } => cmd_resume(callback_port, callback_url),
+        } => cmd_resume(cwd, workflow_id, callback_port, callback_url),
         Commands::Reject {
             task_id,
             reason,
             callback_port,
             callback_url,
-        } => cmd_reject(&task_id, reason.as_deref(), callback_port, callback_url),
+        } => cmd_reject(
+            cwd,
+            workflow_id,
+            &task_id,
+            reason.as_deref(),
+            callback_port,
+            callback_url,
+        ),
         Commands::Status { format } => cmd_status(cwd, &format, workflow_id),
         Commands::Validate { format } => cmd_validate(cwd, &format),
         Commands::List => cmd_list(cwd),
@@ -193,12 +221,33 @@ fn resolve_state(cwd: &Path, workflow_id: Option<&str>) -> Result<Option<Workflo
 }
 
 /// Resolves the daemon's callback base URL from CLI flags, matching the
-/// defaulting logic used by `workflow-runner run` itself.
+/// defaulting logic used by `workflow-runner serve` itself.
 fn resolve_callback_base_url(callback_port: Option<u16>, callback_url: Option<String>) -> String {
     callback_url.unwrap_or_else(|| format!("http://127.0.0.1:{}", callback_port.unwrap_or(8789)))
 }
 
-/// POSTs to a running `workflow-runner run` daemon's callback server.
+/// Resolves the workflow_id to target for approve/resume/reject.
+/// Uses the explicit `--workflow-id` if given; otherwise auto-selects the
+/// single workflow in the local store matching `status`, erroring with the
+/// list of candidates (via `find_workflow_id_by_status`) if more than one
+/// qualifies, or a clear message if none do.
+fn resolve_target_workflow_id(
+    cwd: &Path,
+    workflow_id: Option<&str>,
+    status: &str,
+) -> Result<String> {
+    if let Some(id) = workflow_id {
+        return Ok(id.to_string());
+    }
+    find_workflow_id_by_status(cwd, status)?.with_context(|| {
+        format!(
+            "no workflow with status '{}' found; specify --workflow-id explicitly",
+            status
+        )
+    })
+}
+
+/// POSTs to a running `workflow-runner serve` daemon's callback server.
 /// The daemon replies unconditionally with `"ok"` regardless of whether the
 /// event applied (e.g. approving when nothing is awaiting approval), so this
 /// only confirms that the daemon was reachable, not that the action took effect.
@@ -210,35 +259,115 @@ fn post_to_daemon(url: &str, body: Option<serde_json::Value>) -> Result<()> {
     };
     req.send().with_context(|| {
         format!(
-            "failed to reach workflow-runner run daemon at {}; is `workflow-runner run` running?",
+            "failed to reach workflow-runner serve daemon at {}; is `workflow-runner serve` running?",
             url
         )
     })?;
     Ok(())
 }
 
-fn cmd_approve(callback_port: Option<u16>, callback_url: Option<String>) -> Result<String> {
-    let base = resolve_callback_base_url(callback_port, callback_url);
-    post_to_daemon(&format!("{}/approve", base), None)?;
-    Ok(serde_json::json!({ "ok": true, "action": "approve" }).to_string())
+/// POSTs JSON to a running daemon and returns the raw response body, treating
+/// a non-2xx status as an error. Unlike `post_to_daemon`, this is used where
+/// the caller needs to observe the daemon's synchronous result (e.g. `/run`,
+/// which can fail if the workflow name is not defined in config.yml).
+fn post_to_daemon_expect_ok(url: &str, body: serde_json::Value) -> Result<String> {
+    let client = reqwest::blocking::Client::new();
+    let resp = client.post(url).json(&body).send().with_context(|| {
+        format!(
+            "failed to reach workflow-runner serve daemon at {}; is `workflow-runner serve` running?",
+            url
+        )
+    })?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .context("failed to read workflow-runner serve daemon response body")?;
+    if !status.is_success() {
+        anyhow::bail!("daemon returned an error: {}", text);
+    }
+    Ok(text)
 }
 
-fn cmd_resume(callback_port: Option<u16>, callback_url: Option<String>) -> Result<String> {
+fn cmd_serve(
+    cwd: &Path,
+    callback_port: Option<u16>,
+    callback_url: Option<String>,
+    webhook_port: Option<u16>,
+    webhook_url: Option<String>,
+) -> Result<String> {
+    let cb_port = callback_port.unwrap_or(8789);
+    let cb_url = callback_url.unwrap_or_else(|| format!("http://127.0.0.1:{}", cb_port));
+    let wh_port = webhook_port.unwrap_or(8788);
+    let wh_url = webhook_url.unwrap_or_else(|| format!("http://127.0.0.1:{}", wh_port));
+    let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    rt.block_on(cmd::run::run_daemon(
+        cwd.to_path_buf(),
+        cb_port,
+        cb_url,
+        wh_url,
+    ))?;
+    Ok(String::new())
+}
+
+fn cmd_run(
+    workflow: &str,
+    callback_port: Option<u16>,
+    callback_url: Option<String>,
+) -> Result<String> {
     let base = resolve_callback_base_url(callback_port, callback_url);
-    post_to_daemon(&format!("{}/resume", base), None)?;
-    Ok(serde_json::json!({ "ok": true, "action": "resume" }).to_string())
+    let body = serde_json::json!({ "workflow": workflow });
+    post_to_daemon_expect_ok(&format!("{}/run", base), body)
+}
+
+fn cmd_stop(callback_port: Option<u16>, callback_url: Option<String>) -> Result<String> {
+    let base = resolve_callback_base_url(callback_port, callback_url);
+    post_to_daemon(&format!("{}/stop", base), None)?;
+    Ok(serde_json::json!({ "ok": true, "action": "stop" }).to_string())
+}
+
+fn cmd_approve(
+    cwd: &Path,
+    workflow_id: Option<&str>,
+    callback_port: Option<u16>,
+    callback_url: Option<String>,
+) -> Result<String> {
+    let id = resolve_target_workflow_id(cwd, workflow_id, "awaiting_approval")?;
+    let base = resolve_callback_base_url(callback_port, callback_url);
+    post_to_daemon(&format!("{}/approve/{}", base, id), None)?;
+    Ok(serde_json::json!({ "ok": true, "action": "approve", "workflow_id": id }).to_string())
+}
+
+fn cmd_resume(
+    cwd: &Path,
+    workflow_id: Option<&str>,
+    callback_port: Option<u16>,
+    callback_url: Option<String>,
+) -> Result<String> {
+    let id = resolve_target_workflow_id(cwd, workflow_id, "paused")?;
+    let base = resolve_callback_base_url(callback_port, callback_url);
+    post_to_daemon(&format!("{}/resume/{}", base, id), None)?;
+    Ok(serde_json::json!({ "ok": true, "action": "resume", "workflow_id": id }).to_string())
 }
 
 fn cmd_reject(
+    cwd: &Path,
+    workflow_id: Option<&str>,
     task_id: &str,
     reason: Option<&str>,
     callback_port: Option<u16>,
     callback_url: Option<String>,
 ) -> Result<String> {
+    let id = resolve_target_workflow_id(cwd, workflow_id, "awaiting_approval")?;
     let base = resolve_callback_base_url(callback_port, callback_url);
     let body = reason.map(|r| serde_json::json!({ "reason": r }));
-    post_to_daemon(&format!("{}/reject/{}", base, task_id), body)?;
-    Ok(serde_json::json!({ "ok": true, "action": "reject", "task_id": task_id }).to_string())
+    post_to_daemon(&format!("{}/reject/{}/{}", base, id, task_id), body)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "action": "reject",
+        "workflow_id": id,
+        "task_id": task_id
+    })
+    .to_string())
 }
 
 fn cmd_status(cwd: &Path, format: &str, workflow_id: Option<&str>) -> Result<String> {

@@ -68,6 +68,13 @@ pub struct ErrorOutput {
     pub error: String,
 }
 
+/// Response body for POST /run: identifies the newly started workflow instance.
+#[derive(Debug, Serialize)]
+pub struct RunOutput {
+    pub workflow_id: String,
+    pub workflow: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ValidateOutput {
     pub valid: bool,

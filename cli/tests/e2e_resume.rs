@@ -15,10 +15,10 @@
 //! Covers:
 //!   7-1  /pause stops further automatic activity; /resume re-dispatches the task
 //!   7-2  `workflow-runner resume` CLI reaches the daemon and re-dispatches
-//!   7-3  `workflow-runner resume` outside a paused state is a silent no-op
+//!   7-3  `workflow-runner resume` outside a paused state fails client-side (no target to resolve)
 
 mod helpers;
-use helpers::{pick_free_port, MockWebhook, TempProject, CONFIG_MINIMAL};
+use helpers::{pick_free_port, wait_workflow_completed, MockWebhook, TempProject, CONFIG_MINIMAL};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -32,7 +32,7 @@ fn pause_then_resume_redispatches_task() {
     let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_MINIMAL);
     let cb_port = pick_free_port();
-    let mut proc = proj.start_run("simple", cb_port, &webhook.url());
+    let proc = proj.start_run("simple", cb_port, &webhook.url());
 
     webhook.wait_for_n(1, TIMEOUT); // only-task dispatched
     proc.pause_with_reason("only-task", "need clarification from the user");
@@ -56,8 +56,7 @@ fn pause_then_resume_redispatches_task() {
 
     // The workflow can still complete normally afterward.
     proc.complete("only-task");
-    let status = proc.wait_exit(TIMEOUT);
-    assert!(status.success(), "workflow must complete after resuming");
+    wait_workflow_completed(&proj, &proc.workflow_id, TIMEOUT);
 }
 
 // ── 7-2 ───────────────────────────────────────────────────────────────────────
@@ -85,10 +84,12 @@ fn resume_cli_redispatches_paused_task() {
 
 // ── 7-3 ───────────────────────────────────────────────────────────────────────
 
-/// `workflow-runner resume` sent while the workflow is NOT paused must still
-/// exit 0 (the daemon was reachable) but must not trigger any redispatch.
+/// `workflow-runner resume` sent while no workflow is paused must fail
+/// client-side: without `--workflow-id`, the CLI resolves its target by
+/// querying the local store for a workflow with status `paused`, and errors
+/// out immediately (before ever reaching the daemon) when none exists.
 #[test]
-fn resume_cli_outside_paused_state_is_noop() {
+fn resume_cli_outside_paused_state_fails_to_resolve_target() {
     let webhook = MockWebhook::start();
     let proj = TempProject::new(CONFIG_MINIMAL);
     let cb_port = pick_free_port();
@@ -96,10 +97,10 @@ fn resume_cli_outside_paused_state_is_noop() {
 
     webhook.wait_for_n(1, TIMEOUT); // workflow is "active", never paused
 
-    let out = proj.resume_cli(cb_port);
-    assert_eq!(
-        out["ok"], true,
-        "the CLI only confirms the daemon was reachable, not that resume applied"
+    let stderr = proj.assert_err(&["resume", "--callback-port", &cb_port.to_string()]);
+    assert!(
+        stderr.contains("paused"),
+        "error must explain that no workflow is paused: got '{stderr}'"
     );
 
     std::thread::sleep(Duration::from_millis(300));
