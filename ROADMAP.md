@@ -9,7 +9,7 @@ aidd-workflow の中長期ロードマップ。
 | フェーズ | 状態 |
 |---------|------|
 | v0.0.1　コア実装 | ✅ 完了 |
-| v0.0.2　自律駆動型ワークフロー | ✅ 完了 |
+| v0.0.2　自律駆動型ワークフロー | 着手中 |
 | v0.0.3　ワークフローの視覚化（ダッシュボード作成） | 🔲 未着手 |
 | v0.0.4　リモート通知・承認 | 🔲 未着手 |
 | v0.0.5　デーモンのクラッシュリカバリ（既存ワークフローの復元） | 🔲 未着手 |
@@ -94,7 +94,7 @@ HTTP コールバックで完了を受け取ることで、人手を介さずワ
 3. **Channels webhook への POST** — `reqwest` クレートで `127.0.0.1:8788` に投げる
    - ペイロード: `{ task_id, task, prompt, callback_url, workflow_id }`
    - `callback_url`: `http://127.0.0.1:8789`（コールバックサーバーのベース URL）
-4. ~~既存 CLI コマンドは維持~~ — `start` / `next` / `report` / `complete` は後日（v0.0.2 完了後）
+4. ~~既存 CLI コマンドは維持~~ — `start` / `next` / `report` / `complete` は廃止
    自律実行モードへの一本化に伴い削除された。`approve` / `resume` / `reject` （常駐デーモンへの
    HTTP クライアント）に置き換わっている。詳細は [ARCHITECTURE.md](./ARCHITECTURE.md) を参照
 
@@ -174,18 +174,18 @@ SKILL.md は廃止し、Claude Code の動作は MCP サーバーの `instructio
 ```
 現在地（v0.0.1）
     │
-    └──▶ v0.0.2: 自律駆動型ワークフロー                                  ✅ 完了
+    ├──▶ v0.0.2: 自律駆動型ワークフロー                                  ✅ 完了
     │         │
     │         ├──▶ Item 1: workflow-runner 常駐オーケストレーターモード   ✅ 完了
     │         │
     │         └──▶ Item 2: Channels 統合 & Claude Code ワーカー設定      ✅ 完了
     │                   （Item 1 と並行して着手可能）
     │
-    ├──▶ v0.0.3: ワークフローの視覚化（ダッシュボード作成） （独立して着手可能）
+    ├──▶ v0.0.3: デーモンのクラッシュリカバリ（既存ワークフローの復元）
     │
-    ├──▶ v0.0.4: リモート通知・承認 （v0.0.2 完了後）
+    ├──▶ v0.0.4: ワークフローの視覚化（ダッシュボード作成）
     │
-    └──▶ v0.0.5: デーモンのクラッシュリカバリ（既存ワークフローの復元） （v0.0.2 完了後、独立して着手可能）
+    └──▶ v0.0.5: リモート通知・承認 （v0.0.2 完了後）
 ```
 
 ---
@@ -198,7 +198,54 @@ SKILL.md は廃止し、Claude Code の動作は MCP サーバーの `instructio
 
 ---
 
-## v0.0.3: ワークフローの視覚化（ダッシュボード作成）
+## v0.0.3: デーモンのクラッシュリカバリ（既存ワークフローの復元）
+
+### 目標
+
+`workflow-runner serve` が再起動された際、SQLite 上に残っている `active` / `paused` /
+`awaiting_approval` な既存ワークフローを、新しいデーモンプロセスの `running`
+（`HashMap<workflow_id, RunningWorkflow>`）へ自動復元できるようにする。
+
+### 背景・動機
+
+1デーモンで複数ワークフローを並行実行できるようにした変更（`serve` / `run` / `stop` への分割、
+コールバック URL への `workflow_id` 組み込み）で、SQLite 側は元々複数ワークフローの状態を
+`workflow_id` 単位で永続化できる設計だったが、HTTP レイヤー（`running` マップ）はプロセスの
+インメモリ状態でしかない。そのため、`serve` プロセスが再起動すると、それ以前に `paused` /
+`awaiting_approval` になっていたワークフローは SQLite 上に記録が残っていても
+`running` マップには存在しなくなり、`/resume/:workflow_id` や `/approve/:workflow_id` が
+「未知の workflow_id」としてサイレントに無視されてしまう（`cmd/run.rs` の
+`RunEvent::Approve`/`Resume` ハンドラの `running.get(...)` が `None` を返すケース）。
+
+今回の変更ではこの復元ロジックは意図的にスコープ外とした（既存の「プロセスが死ぬとインメモリ状態が
+失われる」という制約を単に多ワークフロー化しただけで、悪化させてはいない）。次のフェーズで
+明示的に対応する。
+
+### 実装内容（案）
+
+- `serve` 起動時に、当該 `cwd` の `workflow_runs` テーブルから
+  `active` / `paused` / `awaiting_approval` な `workflow_id` を全件取得する新規 `store` 関数
+  （例: `list_active_workflow_ids(cwd) -> Result<Vec<String>>`）を追加する
+- 各 `workflow_id` について `load_state_by_id()` で `WorkflowState` を復元し、
+  `state.workflow`（ワークフロー名）から `config.workflows` を引いて `wf: Workflow` を再構築する
+- `dispatched: HashSet<task_id>` は、`state.tasks` のうち `status == InProgress` なタスクの
+  ID で初期化する（**再 dispatch はしない** — Claude Code 側は既にそのタスクを認識しているはずで、
+  再送すると重複指示になる。あくまで `/complete` 等の後続コールバックを正しく受け取れるように
+  `running` マップへ登録するだけ）
+- 復元中にエラーが起きても `serve` 全体の起動は失敗させない（該当ワークフローだけ復元をスキップし
+  stderr にログを出す）方針を検討する
+
+### 完了基準
+
+- `serve` を一度起動してワークフローを `paused`/`awaiting_approval` にした状態でプロセスを
+  kill → 再度 `serve` を起動すると、`/resume`/`/approve` が引き続き機能する
+- 復元時に再 dispatch が発生しない（Claude Code へタスクが二重送信されない）ことをテストで保証する
+- `cargo test` が全て通過する
+- README.md / ARCHITECTURE.md が更新されている
+
+---
+
+## v0.0.4: ワークフローの視覚化（ダッシュボード作成）
 
 ### 目標
 
@@ -298,7 +345,7 @@ dashboard-ui/         # React + Vite のフロントエンド（独立した npm
 
 ---
 
-## v0.0.4: リモート通知・承認
+## v0.0.5: リモート通知・承認
 
 ### 目標
 
@@ -321,51 +368,4 @@ v0.0.2 で実装したコールバックサーバーの `/approve/:workflow_id` 
 - `awaiting_approval` 状態に入ったとき、Slack または GitHub に通知が届く
 - 通知に含まれる承認 URL を踏むとワークフローが再開する
 - トンネル設定例が docs に記載されている
-- README.md / ARCHITECTURE.md が更新されている
-
----
-
-## v0.0.5: デーモンのクラッシュリカバリ（既存ワークフローの復元）
-
-### 目標
-
-`workflow-runner serve` が再起動された際、SQLite 上に残っている `active` / `paused` /
-`awaiting_approval` な既存ワークフローを、新しいデーモンプロセスの `running`
-（`HashMap<workflow_id, RunningWorkflow>`）へ自動復元できるようにする。
-
-### 背景・動機
-
-1デーモンで複数ワークフローを並行実行できるようにした変更（`serve` / `run` / `stop` への分割、
-コールバック URL への `workflow_id` 組み込み）で、SQLite 側は元々複数ワークフローの状態を
-`workflow_id` 単位で永続化できる設計だったが、HTTP レイヤー（`running` マップ）はプロセスの
-インメモリ状態でしかない。そのため、`serve` プロセスが再起動すると、それ以前に `paused` /
-`awaiting_approval` になっていたワークフローは SQLite 上に記録が残っていても
-`running` マップには存在しなくなり、`/resume/:workflow_id` や `/approve/:workflow_id` が
-「未知の workflow_id」としてサイレントに無視されてしまう（`cmd/run.rs` の
-`RunEvent::Approve`/`Resume` ハンドラの `running.get(...)` が `None` を返すケース）。
-
-今回の変更ではこの復元ロジックは意図的にスコープ外とした（既存の「プロセスが死ぬとインメモリ状態が
-失われる」という制約を単に多ワークフロー化しただけで、悪化させてはいない）。次のフェーズで
-明示的に対応する。
-
-### 実装内容（案）
-
-- `serve` 起動時に、当該 `cwd` の `workflow_runs` テーブルから
-  `active` / `paused` / `awaiting_approval` な `workflow_id` を全件取得する新規 `store` 関数
-  （例: `list_active_workflow_ids(cwd) -> Result<Vec<String>>`）を追加する
-- 各 `workflow_id` について `load_state_by_id()` で `WorkflowState` を復元し、
-  `state.workflow`（ワークフロー名）から `config.workflows` を引いて `wf: Workflow` を再構築する
-- `dispatched: HashSet<task_id>` は、`state.tasks` のうち `status == InProgress` なタスクの
-  ID で初期化する（**再 dispatch はしない** — Claude Code 側は既にそのタスクを認識しているはずで、
-  再送すると重複指示になる。あくまで `/complete` 等の後続コールバックを正しく受け取れるように
-  `running` マップへ登録するだけ）
-- 復元中にエラーが起きても `serve` 全体の起動は失敗させない（該当ワークフローだけ復元をスキップし
-  stderr にログを出す）方針を検討する
-
-### 完了基準
-
-- `serve` を一度起動してワークフローを `paused`/`awaiting_approval` にした状態でプロセスを
-  kill → 再度 `serve` を起動すると、`/resume`/`/approve` が引き続き機能する
-- 復元時に再 dispatch が発生しない（Claude Code へタスクが二重送信されない）ことをテストで保証する
-- `cargo test` が全て通過する
 - README.md / ARCHITECTURE.md が更新されている
